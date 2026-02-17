@@ -58,14 +58,6 @@ class Database:
         return int(doc["source_message_id"])
 
     async def update_forwarded_message_by_source(self, source_chat_id, source_msg_id, file_ids, **kwargs):
-        """
-        نسخه اصلاح شده برای هندل کردن آلبوم‌ها و جلوگیری از پاک شدن دیتا
-        """
-        # ۱. کوئری هوشمند:
-        # یا آیدی مستقیم پیام است
-        # یا اگر آلبوم است، چون تلگرام آیدی پیام‌های بعدی آلبوم را به ترتیب می‌فرستد،
-        # ما چک می‌کنیم که آیدی ارسالی بات، در بازه [آیدی اول آلبوم تا آیدی اول + تعداد] باشد.
-        
         query = {
             "source_chat_id": int(source_chat_id),
             "$or": [
@@ -77,25 +69,18 @@ class Database:
             ]
         }
         
-        # ۲. آماده‌سازی عملیات آپدیت
-        # از $set برای متن و وضعیت استفاده می‌کنیم
-        # از $addToSet برای فایل آیدی استفاده می‌کنیم تا تکراری ذخیره نشود
+        # اول پیدا کردن رکورد با سورت دستی
+        record = await self.db.messages.find_one(query, sort=[("source_msg_id", -1)])
         
-        update_op = {
-            "$set": kwargs,
-        }
-        
-        # اضافه کردن فایل آیدی به یک لیست (جایگزین نمی‌شود، اضافه می‌شود)
+        if not record:
+            return False
+
+        # حالا آپدیت همان رکورد با آیدی دقیق خودش
+        update_op = {"$set": kwargs}
         if file_ids and any(file_ids.values()):
             update_op["$addToSet"] = {"collected_media": file_ids}
 
-        # مرتب‌سازی بر اساس آیدی (نزولی) تا آخرین آلبوم مرتبط را پیدا کند
-        result = await self.db.messages.update_one(
-            query, 
-            update_op,
-            sort=[("source_msg_id", -1)] 
-        )
-        
+        result = await self.db.messages.update_one({"_id": record["_id"]}, update_op)
         return result.modified_count > 0
     async def update_forwarded_message(
         self,
