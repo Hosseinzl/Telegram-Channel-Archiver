@@ -57,6 +57,16 @@ class Database:
             return None
         return int(doc["source_message_id"])
 
+    async def update_forwarded_message_by_source(self, source_chat_id, source_msg_id, **kwargs):
+        # این کد برای MongoDB است، اگر از دیتابیس دیگری استفاده می‌کنید تغییر دهید
+        result = await self.collection.update_one(
+            {
+                "source_chat_id": source_chat_id, 
+                "source_msg_id": source_msg_id
+            },
+            {"$set": kwargs}
+        )
+        return result.modified_count > 0
     async def update_forwarded_message(
         self,
         forwarded_message_id: int,

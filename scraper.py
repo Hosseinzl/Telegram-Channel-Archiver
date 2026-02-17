@@ -128,6 +128,12 @@ def build_message_metadata(
     album_count: int = 0,
 ) -> dict[str, Any]:
     """Build the document to save in MongoDB."""
+    
+    # استخراج آیدی عددی و ثابت کانال مبدأ (تبدیل به فرمت Bot API)
+    # Telethon channel_id (مثبت) -> Bot API (منفی با -100)
+    raw_peer_id = getattr(message.peer_id, "channel_id", 0)
+    formatted_source_chat_id = int(f"-100{raw_peer_id}") if raw_peer_id else None
+
     if source_message_ids is not None:
         # Album: use first message for dates, combine text from all
         source_id = source_message_ids[0]
@@ -140,7 +146,9 @@ def build_message_metadata(
 
     meta = {
         "channel": channel,
-        "source_message_id": source_id,
+        "source_chat_id": formatted_source_chat_id, # فیلد حیاتی جدید
+        "source_msg_id": source_id,                # فیلد حیاتی جدید برای تطبیق
+        "source_message_id": source_id,            # نگه داشتن فیلد قبلی برای سازگاری
         "source_date": source_date,
         "fetch_date": datetime.utcnow().isoformat(),
         "forwarded_message_id": forwarded_message_id,
@@ -154,13 +162,14 @@ def build_message_metadata(
         "forwards": getattr(message, "forwards", None),
         "replies_count": getattr(message.replies, "replies", None) if message.replies else None,
     }
+    
     if message.grouped_id:
         meta["grouped_id"] = message.grouped_id
     if source_message_ids is not None:
         meta["source_message_ids"] = source_message_ids
         meta["album_count"] = album_count
+    
     return meta
-
 
 async def _process_album(
     client: TelegramClient,
@@ -242,173 +251,135 @@ async def _fetch_album_messages(
 import os
 
 
+async def _process_album(
+    client: TelegramClient,
+    channel: str,
+    target_entity,
+    album_messages: list,
+) -> None:
+    """Process an album: forward as a group, save one doc with aggregated media counts."""
+    album_messages.sort(key=lambda m: m.id)
+    ids = [m.id for m in album_messages]
+    logger.debug("Album detected %s grouped_ids=%s", channel, ids)
+
+    media_counts = [analyze_message_media(m) for m in album_messages]
+    media_info = merge_media_counts(media_counts)
+
+    text_parts = []
+    for m in album_messages:
+        t = m.text or m.message or ""
+        if t:
+            text_parts.append(t)
+    text_combined = "\n\n".join(text_parts)
+
+    try:
+        logger.info("Forwarding album %s count=%d first_id=%s last_id=%s", channel, len(ids), ids[0], ids[-1])
+        forwarded = await client.forward_messages(target_entity, ids, channel)
+        if isinstance(forwarded, list):
+            forwarded_ids = [f.id for f in forwarded if f] if forwarded else []
+            forwarded_id = forwarded_ids[0] if forwarded_ids else 0
+            forwarded_ids_list = forwarded_ids
+        else:
+            forwarded_id = forwarded.id if forwarded else 0
+            forwarded_ids_list = [forwarded_id] if forwarded_id else []
+    except Exception as e:
+        logger.error("Failed to forward album %s ids %s: %s", channel, ids, e)
+        return
+
+    # استخراج اطلاعات منبع برای تطابق دقیق در بات
+    raw_peer_id = album_messages[0].peer_id.channel_id
+    formatted_source_chat_id = int(f"-100{raw_peer_id}")
+
+    meta = build_message_metadata(
+        channel,
+        album_messages[0],
+        forwarded_id,
+        media_info,
+        source_message_ids=ids,
+        text_combined=text_combined,
+        album_count=len(album_messages),
+    )
+    
+    # اضافه کردن فیلدهای کلیدی برای جستجوی بات
+    meta["source_chat_id"] = formatted_source_chat_id
+    meta["source_msg_id"] = ids[0]  # اولین آیدی آلبوم ملاک است
+    
+    if len(forwarded_ids_list) > 1:
+        meta["forwarded_message_ids"] = forwarded_ids_list
+
+    logger.debug(
+        "Saving album metadata %s source_msg_id=%s",
+        channel,
+        ids[0]
+    )
+    await db.save_message(meta)
+    logger.info("Processed album %s [%s] -> %s", channel, ",".join(map(str, ids)), forwarded_id)
+
+
 async def process_channel(client: TelegramClient, channel: str, target_entity):
     """Fetch all messages from a channel, forward each to target, save to DB."""
     logger.info("Processing channel: %s", channel)
 
     try:
-        # Find the last message we have already saved for this channel.
-        # If we have one, only fetch messages with a higher id (new messages).
         last_id = await db.get_last_source_message_id(channel)
-        logger.debug("DB watermark %s last_source_message_id=%s", channel, last_id)
-
-        processed = 0
-        skipped = 0
-
-        # First run for this channel (no records in DB): only process a
-        # small, recent backlog to avoid crashing on huge channels.
+        
+        # بخش دریافت پیام‌ها (چه در First Run چه در Iteration)
         if last_id is None:
             backlog_limit = int(os.getenv("FIRST_RUN_BACKLOG_LIMIT", "5"))
-            logger.info(
-                "First run for %s with empty DB; processing last %d messages",
-                channel,
-                backlog_limit,
-            )
             messages = await client.get_messages(channel, limit=backlog_limit)
-            # Telethon returns newest first; process oldest->newest
             messages = [m for m in messages if m]
             messages.sort(key=lambda m: m.id)
+        else:
+            messages = [] # در حالت iter_messages مستقیماً هندل می‌شود
 
-            for message in messages:
-                if not message:
-                    continue
-
-                # Album: fetch all members (can be interleaved), process as one
-                if message.grouped_id:
-                    if await db.grouped_exists(channel, message.grouped_id):
-                        skipped += 1
-                        logger.debug(
-                            "Skip album already processed %s grouped_id=%s",
-                            channel,
-                            message.grouped_id,
-                        )
-                        continue
-                    if await db.message_exists(channel, message.id):
-                        skipped += 1
-                        logger.debug(
-                            "Skip album member already processed %s/%s grouped_id=%s",
-                            channel,
-                            message.id,
-                            message.grouped_id,
-                        )
-                        continue  # Part of already-processed album
-
-                    album_messages = await _fetch_album_messages(
-                        client, channel, message.grouped_id, message.id
-                    )
-                    if album_messages:
-                        await _process_album(
-                            client, channel, target_entity, album_messages
-                        )
-                        processed += 1
-                        await asyncio.sleep(1)
-                    continue
-
-                if await db.message_exists(channel, message.id):
-                    logger.debug("Skip already processed: %s/%s", channel, message.id)
-                    skipped += 1
-                    continue
-
-                media_info = analyze_message_media(message)
-
-                try:
-                    logger.info("Forwarding %s/%s", channel, message.id)
-                    forwarded = await client.forward_messages(
-                        target_entity, message.id, channel
-                    )
-                    if isinstance(forwarded, list):
-                        forwarded_id = forwarded[0].id if forwarded else 0
-                    else:
-                        forwarded_id = forwarded.id if forwarded else 0
-                except Exception as e:
-                    logger.error("Failed to forward %s/%s: %s", channel, message.id, e)
-                    continue
-
-                meta = build_message_metadata(
-                    channel, message, forwarded_id, media_info
-                )
-                logger.debug(
-                    "Saving metadata %s/%s forwarded_id=%s media=%s text_len=%d",
-                    channel,
-                    message.id,
-                    forwarded_id,
-                    media_info,
-                    len((message.text or message.message or "") or ""),
-                )
-                await db.save_message(meta)
-
-                logger.info("Processed %s/%s -> %s", channel, message.id, forwarded_id)
-                processed += 1
-                await asyncio.sleep(1)
-
-            logger.info("Channel done %s processed=%d skipped=%d", channel, processed, skipped)
-            return
-
-        # Not first run: only fetch messages newer than last_id
-        iter_kwargs = {"min_id": last_id}
-        logger.debug("Iterating messages %s with %s", channel, iter_kwargs)
-
-        async for message in client.iter_messages(channel, **iter_kwargs):
-            if not message:
-                continue
-
-            # Album: fetch all members (can be interleaved), process as one
+        # تابع کمکی برای پردازش هر پیام (جلوگیری از تکرار کد)
+        async def handle_single_message(message):
             if message.grouped_id:
-                if await db.grouped_exists(channel, message.grouped_id):
-                    skipped += 1
-                    logger.debug("Skip album already processed %s grouped_id=%s", channel, message.grouped_id)
-                    continue
-                if await db.message_exists(channel, message.id):
-                    skipped += 1
-                    logger.debug("Skip album member already processed %s/%s grouped_id=%s", channel, message.id, message.grouped_id)
-                    continue  # Part of already-processed album
-
-                album_messages = await _fetch_album_messages(
-                    client, channel, message.grouped_id, message.id
-                )
-                if album_messages:
-                    await _process_album(client, channel, target_entity, album_messages)
-                    processed += 1
-                    await asyncio.sleep(1)
-                continue
+                if await db.grouped_exists(channel, message.grouped_id) or await db.message_exists(channel, message.id):
+                    return False
+                album = await _fetch_album_messages(client, channel, message.grouped_id, message.id)
+                if album:
+                    await _process_album(client, channel, target_entity, album)
+                    return True
+                return False
 
             if await db.message_exists(channel, message.id):
-                logger.debug("Skip already processed: %s/%s", channel, message.id)
-                skipped += 1
-                continue
+                return False
 
             media_info = analyze_message_media(message)
-
             try:
-                logger.info("Forwarding %s/%s", channel, message.id)
                 forwarded = await client.forward_messages(target_entity, message.id, channel)
-                if isinstance(forwarded, list):
-                    forwarded_id = forwarded[0].id if forwarded else 0
-                else:
-                    forwarded_id = forwarded.id if forwarded else 0
+                f_id = forwarded[0].id if isinstance(forwarded, list) else (forwarded.id if forwarded else 0)
             except Exception as e:
                 logger.error("Failed to forward %s/%s: %s", channel, message.id, e)
-                continue
+                return False
 
-            meta = build_message_metadata(channel, message, forwarded_id, media_info)
-            logger.debug(
-                "Saving metadata %s/%s forwarded_id=%s media=%s text_len=%d",
-                channel,
-                message.id,
-                forwarded_id,
-                media_info,
-                len((message.text or message.message or "") or ""),
-            )
+            # ذخیره متادیتا با اطلاعات منبع
+            raw_id = message.peer_id.channel_id
+            formatted_src_chat_id = int(f"-100{raw_id}")
+
+            meta = build_message_metadata(channel, message, f_id, media_info)
+            meta["source_chat_id"] = formatted_src_chat_id
+            meta["source_msg_id"] = message.id
+            
             await db.save_message(meta)
+            logger.info("Processed %s/%s -> %s", channel, message.id, f_id)
+            return True
 
-            logger.info("Processed %s/%s -> %s", channel, message.id, forwarded_id)
-            processed += 1
-            await asyncio.sleep(1)
+        # اجرای پردازش برای پیام‌ها
+        if last_id is None:
+            for m in messages:
+                if await handle_single_message(m):
+                    await asyncio.sleep(1)
+        else:
+            async for m in client.iter_messages(channel, min_id=last_id):
+                if not m: continue
+                if await handle_single_message(m):
+                    await asyncio.sleep(1)
 
-        logger.info("Channel done %s processed=%d skipped=%d", channel, processed, skipped)
+        logger.info("Channel done %s", channel)
     except Exception as e:
         logger.exception("Error processing channel %s: %s", channel, e)
-
 
 async def run():
     """Main agent loop."""

@@ -5,7 +5,7 @@ import logging
 import time
 from typing import Any
 
-from telegram import Update
+from telegram import Update, MessageOriginChannel
 from telegram.ext import Application, MessageHandler, filters, ContextTypes
 
 from config import TARGET_GROUP
@@ -64,7 +64,6 @@ def extract_file_ids(message: Any) -> dict[str, Any]:
 
     return file_ids
 
-
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Process incoming message: extract text/file IDs and update DB."""
     message = update.message
@@ -72,56 +71,61 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not message:
         return
     
-    # Only process messages in the target group
+    # محدود کردن به گروه هدف
     chat_id = message.chat_id
     if chat_id != TARGET_GROUP:
-        logger.debug("Ignoring message from chat %s (not target group %s)", chat_id, TARGET_GROUP)
+        logger.debug("Ignoring message from chat %s", chat_id)
         return
+
+    # استخراج اطلاعات فوروارد (نقطه اتصال با تلثون)
+    if not message.forward_origin or not isinstance(message.forward_origin, MessageOriginChannel):
+        logger.debug("Message %s is not a forwarded channel message, skipping", message.message_id)
+        return
+
+    source_chat_id = message.forward_origin.chat.id
+    source_msg_id = message.forward_origin.message_id
+    bot_message_id = message.message_id
+
+    logger.info("Processing message %s (Source: %s, Msg: %s)", bot_message_id, source_chat_id, source_msg_id)
     
-    message_id = message.message_id
-    logger.info("Processing forwarded message %s in group %s", message_id, chat_id)
-    
-    # Extract text content
+    # استخراج محتوا
     text = message.text or message.caption or ""
-    
-    # Extract file IDs
     file_ids = extract_file_ids(message)
     
-    # Check if we have any file IDs or text
     has_content = bool(text) or any(
-        file_ids.get(key) for key in file_ids.keys()
-        if isinstance(file_ids.get(key), (str, list)) and file_ids.get(key)
+        file_ids.get(k) for k in file_ids.keys()
+        if isinstance(file_ids.get(k), (str, list)) and file_ids.get(k)
     )
     
     if not has_content:
-        logger.debug("Message %s has no text or file content, skipping", message_id)
         return
     
-    # Find the document in MongoDB with matching forwarded_message_id
-    time.sleep(2)
+    # وقفه کوتاه برای اطمینان از اینکه تلثون قبلاً رکورد را ساخته است
+    time.sleep(1)
+    
     try:
-        updated = await db.update_forwarded_message(
-            forwarded_message_id=message_id,
+        # جستجو و آپدیت بر اساس اطلاعات منبع (نه آیدی فوروارد)
+        updated = await db.update_forwarded_message_by_source(
+            source_chat_id=source_chat_id,
+            source_msg_id=source_msg_id,
             text=text,
             file_ids=file_ids,
+            bot_message_id=bot_message_id, # ذخیره آیدی جدید بات برای مراجعات بعدی
             state="completed"
         )
         
         if updated:
             logger.info(
-                "Updated message %s: text_len=%d file_ids=%s",
-                message_id,
-                len(text),
-                {k: v for k, v in file_ids.items() if v},
+                "Successfully matched and updated source %s/%s with Bot ID %s",
+                source_chat_id, source_msg_id, bot_message_id
             )
         else:
             logger.warning(
-                "No document found for forwarded_message_id=%s (may not be from our scraper)",
-                message_id
+                "DB Mapping failed for source %s/%s (No matching record found)",
+                source_chat_id, source_msg_id
             )
     except Exception as e:
-        logger.exception("Error updating message %s: %s", message_id, e)
-
+        logger.exception("Error in DB update for message %s: %s", bot_message_id, e)
 
 async def main():
     """Start the bot."""
