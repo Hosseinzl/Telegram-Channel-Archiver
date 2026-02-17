@@ -10,22 +10,10 @@ services:
     env_file:
       - .env
     environment:
-      - MONGODB_URI=mongodb://mongodb:27017
+      - MONGODB_URI=mongodb://host.docker.internal:27017
       - SESSION_PATH=/data
     volumes:
       - session_data:/data
-    depends_on:
-      - mongodb
-
-  mongodb:
-    image: mongo:7
-    container_name: faraz-mongodb
-    restart: unless-stopped
-    volumes:
-      - mongodb_data:/data/db
-    ports:
-      - "27017:27017"
 
 volumes:
   session_data:
-  mongodb_data:
