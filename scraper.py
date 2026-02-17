@@ -166,7 +166,7 @@ def build_message_metadata(
         "text_length": len(text),
         "text_preview": text[:500] if text else None,
     }
-    
+    print(meta)
     if message.grouped_id:
         meta["grouped_id"] = message.grouped_id
     if source_message_ids is not None:
