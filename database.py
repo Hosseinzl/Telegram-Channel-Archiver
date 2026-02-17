@@ -63,12 +63,9 @@ class Database:
         """
         آپدیت گروهی برای اطمینان از اعمال تغییرات روی داکیومنت صحیح
         """
-        # فقط داکیومنت‌هایی که در ۱ ساعت اخیر ساخته شده‌اند را بررسی کن (برای امنیت و سرعت)
-        time_threshold = datetime.utcnow() - timedelta(hours=1)
         
         query = {
             "source_chat_id": int(source_chat_id),
-            "_created_at": {"$gte": time_threshold}, # محدود کردن به پیام‌های اخیر
             "$or": [
                 {"source_msg_id": int(source_msg_id)}, # تطبیق مستقیم
                 {
