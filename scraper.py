@@ -129,26 +129,35 @@ def build_message_metadata(
 ) -> dict[str, Any]:
     """Build the document to save in MongoDB."""
     
-    # استخراج آیدی عددی و ثابت کانال مبدأ (تبدیل به فرمت Bot API)
-    # Telethon channel_id (مثبت) -> Bot API (منفی با -100)
-    raw_peer_id = getattr(message.peer_id, "channel_id", 0)
-    formatted_source_chat_id = int(f"-100{raw_peer_id}") if raw_peer_id else None
+    # --- بخش اصلاح شده برای پیدا کردن منبع واقعی ---
+    if message.forward:
+        # اگر پیام خودش فوروارد شده است، اطلاعات منبع اصلی را بردار
+        # Telethon: message.forward.from_id معمولاً PeerChannel است
+        raw_peer_id = getattr(message.forward.from_id, "channel_id", 0)
+        source_msg_id = message.forward.channel_post # آیدی پیام در کانال اصلی
+        formatted_source_chat_id = int(f"-100{raw_peer_id}") if raw_peer_id else None
+    else:
+        # اگر پیام مستقیماً پست شده، اطلاعات کانال فعلی را بردار
+        raw_peer_id = getattr(message.peer_id, "channel_id", 0)
+        source_msg_id = message.id
+        formatted_source_chat_id = int(f"-100{raw_peer_id}") if raw_peer_id else None
+    # ----------------------------------------------
 
     if source_message_ids is not None:
-        # Album: use first message for dates, combine text from all
-        source_id = source_message_ids[0]
+        source_id_for_db = source_message_ids[0]
         source_date = message.date.isoformat() if message.date else None
         text = text_combined
     else:
-        source_id = message.id
+        source_id_for_db = message.id
         source_date = message.date.isoformat() if message.date else None
         text = message.text or message.message or ""
 
     meta = {
         "channel": channel,
-        "source_chat_id": formatted_source_chat_id, # فیلد حیاتی جدید
-        "source_msg_id": source_id,                # فیلد حیاتی جدید برای تطبیق
-        "source_message_id": source_id,            # نگه داشتن فیلد قبلی برای سازگاری
+        "source_chat_id": formatted_source_chat_id, 
+        "source_msg_id": source_msg_id,            # آیدی که بات قرار است ببیند
+        "internal_source_id": source_id_for_db,     # آیدی در کانال واسط (تست)
+        "source_message_id": source_id_for_db,      # برای سازگاری با کدهای قبلی
         "source_date": source_date,
         "fetch_date": datetime.utcnow().isoformat(),
         "forwarded_message_id": forwarded_message_id,
@@ -160,7 +169,6 @@ def build_message_metadata(
         "has_edit_date": message.edit_date is not None,
         "views": getattr(message, "views", None),
         "forwards": getattr(message, "forwards", None),
-        "replies_count": getattr(message.replies, "replies", None) if message.replies else None,
     }
     
     if message.grouped_id:
@@ -170,7 +178,7 @@ def build_message_metadata(
         meta["album_count"] = album_count
     
     return meta
-
+    
 async def _process_album(
     client: TelegramClient,
     channel: str,
