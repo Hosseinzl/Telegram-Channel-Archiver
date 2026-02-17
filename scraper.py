@@ -129,46 +129,42 @@ def build_message_metadata(
 ) -> dict[str, Any]:
     """Build the document to save in MongoDB."""
     
-    # --- بخش اصلاح شده برای پیدا کردن منبع واقعی ---
-    if message.forward:
-        # اگر پیام خودش فوروارد شده است، اطلاعات منبع اصلی را بردار
-        # Telethon: message.forward.from_id معمولاً PeerChannel است
-        raw_peer_id = getattr(message.forward.from_id, "channel_id", 0)
-        source_msg_id = message.forward.channel_post # آیدی پیام در کانال اصلی
-        formatted_source_chat_id = int(f"-100{raw_peer_id}") if raw_peer_id else None
-    else:
-        # اگر پیام مستقیماً پست شده، اطلاعات کانال فعلی را بردار
-        raw_peer_id = getattr(message.peer_id, "channel_id", 0)
-        source_msg_id = message.id
-        formatted_source_chat_id = int(f"-100{raw_peer_id}") if raw_peer_id else None
-    # ----------------------------------------------
+    # پیش‌فرض: فرض می‌کنیم پیام مستقیم است
+    raw_peer_id = getattr(message.peer_id, "channel_id", 0)
+    source_msg_id = message.id
+    
+    # چک کردن دقیق فوروارد
+    # در تلثون fwd_from حاوی اطلاعات فوروارد است
+    if message.fwd_from:
+        fwd = message.fwd_from
+        # اگر از یک کانال فوروارد شده باشد
+        if fwd.from_id and hasattr(fwd.from_id, 'channel_id'):
+            raw_peer_id = fwd.from_id.channel_id
+            source_msg_id = fwd.channel_post
+        # اگر از یک کاربر یا چت فوروارد شده باشد (اختیاری)
+        elif fwd.from_id:
+            # اگر نیاز دارید فورواردهای شخصی را هم بگیرید اینجا اضافه کنید
+            pass
 
-    if source_message_ids is not None:
-        source_id_for_db = source_message_ids[0]
-        source_date = message.date.isoformat() if message.date else None
-        text = text_combined
-    else:
-        source_id_for_db = message.id
-        source_date = message.date.isoformat() if message.date else None
-        text = message.text or message.message or ""
+    formatted_source_chat_id = int(f"-100{raw_peer_id}") if raw_peer_id else None
+
+    # تعیین آیدی داخلی برای دیتابیس
+    internal_id = source_message_ids[0] if source_message_ids else message.id
+    text = text_combined if source_message_ids else (message.text or message.message or "")
 
     meta = {
         "channel": channel,
         "source_chat_id": formatted_source_chat_id, 
-        "source_msg_id": source_msg_id,            # آیدی که بات قرار است ببیند
-        "internal_source_id": source_id_for_db,     # آیدی در کانال واسط (تست)
-        "source_message_id": source_id_for_db,      # برای سازگاری با کدهای قبلی
-        "source_date": source_date,
+        "source_msg_id": source_msg_id,            # این همان 290740 خواهد شد
+        "internal_source_id": internal_id,        # این همان 28 (کانال تست) می‌ماند
+        "source_message_id": internal_id,
+        "source_date": message.date.isoformat() if message.date else None,
         "fetch_date": datetime.utcnow().isoformat(),
         "forwarded_message_id": forwarded_message_id,
         "forwarded_chat_id": str(TARGET_GROUP),
         "media": media_info,
         "text_length": len(text),
         "text_preview": text[:500] if text else None,
-        "has_reply": message.reply_to is not None,
-        "has_edit_date": message.edit_date is not None,
-        "views": getattr(message, "views", None),
-        "forwards": getattr(message, "forwards", None),
     }
     
     if message.grouped_id:
@@ -178,7 +174,7 @@ def build_message_metadata(
         meta["album_count"] = album_count
     
     return meta
-    
+
 async def _process_album(
     client: TelegramClient,
     channel: str,
