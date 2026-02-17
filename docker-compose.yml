@@ -7,9 +7,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    environment:
-      - MONGODB_URI=mongodb://127.0.0.1:27017
-      - SESSION_PATH=/data
     volumes:
       - ./session_data:/data
-    network_mode: "host"
+    networks:
+      - archiver-net
+
+networks:
+  archiver-net:
+    external: true
