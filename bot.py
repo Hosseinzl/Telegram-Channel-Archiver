@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+import time
 from typing import Any
 
 from telegram import Update
@@ -97,6 +98,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     
     # Find the document in MongoDB with matching forwarded_message_id
+    time.sleep(2)
     try:
         updated = await db.update_forwarded_message(
             forwarded_message_id=message_id,

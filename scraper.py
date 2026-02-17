@@ -243,77 +243,144 @@ import os
 
 
 async def process_channel(client: TelegramClient, channel: str, target_entity):
-    """Fetch all messages from a channel, forward each to target, save to DB safely."""
+    """Fetch all messages from a channel, forward each to target, save to DB."""
     logger.info("Processing channel: %s", channel)
 
     try:
+        # Find the last message we have already saved for this channel.
+        # If we have one, only fetch messages with a higher id (new messages).
         last_id = await db.get_last_source_message_id(channel)
         logger.debug("DB watermark %s last_source_message_id=%s", channel, last_id)
 
         processed = 0
         skipped = 0
 
-        # Determine backlog for first run
+        # First run for this channel (no records in DB): only process a
+        # small, recent backlog to avoid crashing on huge channels.
         if last_id is None:
             backlog_limit = int(os.getenv("FIRST_RUN_BACKLOG_LIMIT", "5"))
-            logger.info("First run for %s; processing last %d messages", channel, backlog_limit)
+            logger.info(
+                "First run for %s with empty DB; processing last %d messages",
+                channel,
+                backlog_limit,
+            )
             messages = await client.get_messages(channel, limit=backlog_limit)
+            # Telethon returns newest first; process oldest->newest
             messages = [m for m in messages if m]
             messages.sort(key=lambda m: m.id)
-        else:
-            messages = []
-            async for m in client.iter_messages(channel, min_id=last_id):
-                if m:
-                    messages.append(m)
-            messages.sort(key=lambda m: m.id)
 
-        for message in messages:
+            for message in messages:
+                if not message:
+                    continue
+
+                # Album: fetch all members (can be interleaved), process as one
+                if message.grouped_id:
+                    if await db.grouped_exists(channel, message.grouped_id):
+                        skipped += 1
+                        logger.debug(
+                            "Skip album already processed %s grouped_id=%s",
+                            channel,
+                            message.grouped_id,
+                        )
+                        continue
+                    if await db.message_exists(channel, message.id):
+                        skipped += 1
+                        logger.debug(
+                            "Skip album member already processed %s/%s grouped_id=%s",
+                            channel,
+                            message.id,
+                            message.grouped_id,
+                        )
+                        continue  # Part of already-processed album
+
+                    album_messages = await _fetch_album_messages(
+                        client, channel, message.grouped_id, message.id
+                    )
+                    if album_messages:
+                        await _process_album(
+                            client, channel, target_entity, album_messages
+                        )
+                        processed += 1
+                        await asyncio.sleep(1)
+                    continue
+
+                if await db.message_exists(channel, message.id):
+                    logger.debug("Skip already processed: %s/%s", channel, message.id)
+                    skipped += 1
+                    continue
+
+                media_info = analyze_message_media(message)
+
+                try:
+                    logger.info("Forwarding %s/%s", channel, message.id)
+                    forwarded = await client.forward_messages(
+                        target_entity, message.id, channel
+                    )
+                    if isinstance(forwarded, list):
+                        forwarded_id = forwarded[0].id if forwarded else 0
+                    else:
+                        forwarded_id = forwarded.id if forwarded else 0
+                except Exception as e:
+                    logger.error("Failed to forward %s/%s: %s", channel, message.id, e)
+                    continue
+
+                meta = build_message_metadata(
+                    channel, message, forwarded_id, media_info
+                )
+                logger.debug(
+                    "Saving metadata %s/%s forwarded_id=%s media=%s text_len=%d",
+                    channel,
+                    message.id,
+                    forwarded_id,
+                    media_info,
+                    len((message.text or message.message or "") or ""),
+                )
+                await db.save_message(meta)
+
+                logger.info("Processed %s/%s -> %s", channel, message.id, forwarded_id)
+                processed += 1
+                await asyncio.sleep(1)
+
+            logger.info("Channel done %s processed=%d skipped=%d", channel, processed, skipped)
+            return
+
+        # Not first run: only fetch messages newer than last_id
+        iter_kwargs = {"min_id": last_id}
+        logger.debug("Iterating messages %s with %s", channel, iter_kwargs)
+
+        async for message in client.iter_messages(channel, **iter_kwargs):
             if not message:
                 continue
 
-            # --- Handle albums ---
+            # Album: fetch all members (can be interleaved), process as one
             if message.grouped_id:
                 if await db.grouped_exists(channel, message.grouped_id):
                     skipped += 1
+                    logger.debug("Skip album already processed %s grouped_id=%s", channel, message.grouped_id)
                     continue
                 if await db.message_exists(channel, message.id):
                     skipped += 1
+                    logger.debug("Skip album member already processed %s/%s grouped_id=%s", channel, message.id, message.grouped_id)
                     continue  # Part of already-processed album
 
-                album_messages = await _fetch_album_messages(client, channel, message.grouped_id, message.id)
+                album_messages = await _fetch_album_messages(
+                    client, channel, message.grouped_id, message.id
+                )
                 if album_messages:
-                    # 1️⃣ Save metadata for all album messages first
-                    for m in album_messages:
-                        media_info = analyze_message_media(m)
-                        meta = build_message_metadata(channel, m, forwarded_id=0, media_info=media_info)
-                        await db.save_message(meta)
-
-                    # 2️⃣ Forward album
-                    try:
-                        forwarded_list = await client.forward_messages(target_entity, [m.id for m in album_messages], channel)
-                        # 3️⃣ Update forwarded_id for each message
-                        for orig_msg, fwd_msg in zip(album_messages, forwarded_list):
-                            fwd_id = fwd_msg.id if fwd_msg else 0
-                            await db.update_forwarded_id(channel, orig_msg.id, fwd_id)
-                    except Exception as e:
-                        logger.error("Failed to forward album %s: %s", message.grouped_id, e)
-
+                    await _process_album(client, channel, target_entity, album_messages)
                     processed += 1
                     await asyncio.sleep(1)
                 continue
 
-            # --- Single message ---
             if await db.message_exists(channel, message.id):
+                logger.debug("Skip already processed: %s/%s", channel, message.id)
                 skipped += 1
                 continue
 
             media_info = analyze_message_media(message)
-            # 1️⃣ Save metadata first
-            meta = build_message_metadata(channel, message, forwarded_id=0, media_info=media_info)
-            await db.save_message(meta)
 
-            # 2️⃣ Forward
             try:
+                logger.info("Forwarding %s/%s", channel, message.id)
                 forwarded = await client.forward_messages(target_entity, message.id, channel)
                 if isinstance(forwarded, list):
                     forwarded_id = forwarded[0].id if forwarded else 0
@@ -321,18 +388,27 @@ async def process_channel(client: TelegramClient, channel: str, target_entity):
                     forwarded_id = forwarded.id if forwarded else 0
             except Exception as e:
                 logger.error("Failed to forward %s/%s: %s", channel, message.id, e)
-                forwarded_id = 0
+                continue
 
-            # 3️⃣ Update forwarded_id
-            await db.update_forwarded_id(channel, message.id, forwarded_id)
+            meta = build_message_metadata(channel, message, forwarded_id, media_info)
+            logger.debug(
+                "Saving metadata %s/%s forwarded_id=%s media=%s text_len=%d",
+                channel,
+                message.id,
+                forwarded_id,
+                media_info,
+                len((message.text or message.message or "") or ""),
+            )
+            await db.save_message(meta)
 
+            logger.info("Processed %s/%s -> %s", channel, message.id, forwarded_id)
             processed += 1
             await asyncio.sleep(1)
 
         logger.info("Channel done %s processed=%d skipped=%d", channel, processed, skipped)
-
     except Exception as e:
         logger.exception("Error processing channel %s: %s", channel, e)
+
 
 async def run():
     """Main agent loop."""
