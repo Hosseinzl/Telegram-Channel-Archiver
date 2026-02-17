@@ -57,49 +57,43 @@ class Database:
             return None
         return int(doc["source_message_id"])
 
+    from datetime import datetime, timedelta
+
     async def update_forwarded_message_by_source(self, source_chat_id, source_msg_id, file_ids, **kwargs):
         """
-        نسخه نهایی: استفاده از ترکیب آیدی منبع و آیدی فوروارد برای دقت ۱۰۰ درصد
+        آپدیت گروهی برای اطمینان از اعمال تغییرات روی داکیومنت صحیح
         """
-        # ۱. ابتدا تلاش می‌کنیم رکورد را بر اساس آیدی دقیق منبع پیدا کنیم
-        # این برای پیام‌های تکی عالی عمل می‌کند.
+        # فقط داکیومنت‌هایی که در ۱ ساعت اخیر ساخته شده‌اند را بررسی کن (برای امنیت و سرعت)
+        time_threshold = datetime.utcnow() - timedelta(hours=1)
+        
         query = {
             "source_chat_id": int(source_chat_id),
-            "source_msg_id": int(source_msg_id)
+            "_created_at": {"$gte": time_threshold}, # محدود کردن به پیام‌های اخیر
+            "$or": [
+                {"source_msg_id": int(source_msg_id)}, # تطبیق مستقیم
+                {
+                    # تطبیق آلبوم: آیدی منبع در بازه آلبوم باشد
+                    "source_msg_id": {"$lte": int(source_msg_id), "$gt": int(source_msg_id) - 15},
+                    "album_count": {"$exists": True}
+                }
+            ]
         }
-        
-        record = await self.collection.find_one(query)
 
-        # ۲. اگر پیدا نشد (احتمالاً آلبوم است و آیدی دوم به بعد فرستاده شده)
-        if not record:
-            # جستجو در بازه کوچک: رکوردی که آیدی منبعش کمی قبل‌تر است و آلبوم است
-            # و هنوز وضعیتش تکمیل نشده یا همین الان ساخته شده
-            query_album = {
-                "source_chat_id": int(source_chat_id),
-                "source_msg_id": {"$lte": int(source_msg_id), "$gt": int(source_msg_id) - 10},
-                "album_count": {"$exists": True}
-            }
-            record = await self.collection.find_one(query_album, sort=[("source_msg_id", -1)])
-
-        if not record:
-            return False
-
-        # ۳. آماده‌سازی عملیات آپدیت
+        # آماده‌سازی عملیات
         clean_media = {k: v for k, v in file_ids.items() if v}
-        
         update_op = {"$set": kwargs}
+        
         if clean_media:
-            # استفاده از $addToSet برای جلوگیری از تکرار
             update_op["$addToSet"] = {"collected_media": clean_media}
 
-        # ۴. آپدیت دقیق بر اساس _id منحصر به فرد
-        result = await self.collection.update_one({"_id": record["_id"]}, update_op)
+        # آپدیت همه داکیومنت‌هایی که در کوئری صدق می‌کنند
+        result = await self.db.messages.update_many(query, update_op)
         
-        # لاگ داخلی برای اطمینan
         if result.matched_count > 0:
-            print(f"DEBUG: Applied update to _id: {record['_id']} | Source: {record.get('source_msg_id')}")
-            
+            logger.info(f"✅ DB Update Many: Matched {result.matched_count}, Modified {result.modified_count}")
+        
         return result.matched_count > 0
+
     async def update_forwarded_message(
         self,
         forwarded_message_id: int,
