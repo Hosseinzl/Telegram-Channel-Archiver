@@ -82,6 +82,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     # ۲. استخراج محتوا (متن و فایل آیدی)
     text = message.text or message.caption or ""
+    print(f"this is file text:  {text}")
     file_ids = extract_file_ids(message)
     print(f"file ids:{file_ids}")
     # ۳. فیلتر کردن پیام‌های فاقد محتوا
