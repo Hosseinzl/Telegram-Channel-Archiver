@@ -168,7 +168,7 @@ def build_message_metadata(
         "forwarded_chat_id": str(TARGET_GROUP),
         "media": media_info,
         "text_length": len(text),
-        "text_preview": text[:500] if text else None,
+        "text_preview": text if text else None,
         "has_reply": message.reply_to is not None,
         "has_edit_date": message.edit_date is not None,
         "views": getattr(message, "views", None),
