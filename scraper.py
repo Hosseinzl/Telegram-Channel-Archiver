@@ -186,19 +186,16 @@ def build_message_metadata(
         meta["album_count"] = album_count
     
     return meta
-
 async def _process_album(
     client: TelegramClient,
     channel: str,
     target_entity,
     album_messages: list,
 ) -> None:
-    """Process an album: forward as a group, save one doc with aggregated media counts."""
-    # Sort by id ascending (chronological) for correct forward order
+    """Process an album correctly without overwriting original source info."""
     album_messages.sort(key=lambda m: m.id)
     ids = [m.id for m in album_messages]
-    logger.debug("Album detected %s grouped_ids=%s", channel, ids)
-
+    
     media_counts = [analyze_message_media(m) for m in album_messages]
     media_info = merge_media_counts(media_counts)
 
@@ -210,7 +207,6 @@ async def _process_album(
     text_combined = "\n\n".join(text_parts)
 
     try:
-        logger.info("Forwarding album %s count=%d first_id=%s last_id=%s", channel, len(ids), ids[0], ids[-1])
         forwarded = await client.forward_messages(target_entity, ids, channel)
         if isinstance(forwarded, list):
             forwarded_ids = [f.id for f in forwarded if f] if forwarded else []
@@ -219,9 +215,12 @@ async def _process_album(
             forwarded_id = forwarded.id if forwarded else 0
             forwarded_ids = [forwarded_id] if forwarded_id else []
     except Exception as e:
-        logger.error("Failed to forward album %s ids %s: %s", channel, ids, e)
+        logger.error("Failed to forward album %s: %s", channel, e)
         return
 
+    # --- اصلاح اصلی اینجاست ---
+    # فقط تابع را صدا می‌زنیم. این تابع خودش هوشمند است و 
+    # اگر آلبوم فورواردی باشد، آیدی منبع اصلی (ورزش 3) را برمی‌دارد.
     meta = build_message_metadata(
         channel,
         album_messages[0],
@@ -231,106 +230,14 @@ async def _process_album(
         text_combined=text_combined,
         album_count=len(album_messages),
     )
-    # Store all forwarded message IDs for albums (bot needs to match any of them)
+    
+    # دیگر دستی source_chat_id یا source_msg_id را ست نکنید!
+    # فقط اگر لیست آیدی‌ها را برای بات لازم دارید اضافه کنید
     if len(forwarded_ids) > 1:
         meta["forwarded_message_ids"] = forwarded_ids
-    logger.debug(
-        "Saving album metadata %s forwarded_id=%s media=%s text_len=%d",
-        channel,
-        forwarded_id,
-        media_info,
-        len(text_combined or ""),
-    )
+
     await db.save_message(meta)
-    logger.info("Processed album %s [%s] -> %s", channel, ",".join(map(str, ids)), forwarded_id)
-
-
-async def _fetch_album_messages(
-    client: TelegramClient, channel: str, grouped_id: int, known_message_id: int
-) -> list:
-    """Fetch all messages in an album (they can be interleaved with others)."""
-    # Albums are max 10 items; fetch a window to catch them all
-    logger.debug(
-        "Fetching album window %s grouped_id=%s around_message=%s",
-        channel,
-        grouped_id,
-        known_message_id,
-    )
-    messages = await client.get_messages(
-        channel, min_id=known_message_id - 50, max_id=known_message_id + 1
-    )
-    album = [m for m in messages if m and getattr(m, "grouped_id", None) == grouped_id]
-    logger.debug("Album window fetched %s grouped_id=%s found=%d", channel, grouped_id, len(album))
-    return sorted(album, key=lambda m: m.id)
-
-
-import os
-
-
-async def _process_album(
-    client: TelegramClient,
-    channel: str,
-    target_entity,
-    album_messages: list,
-) -> None:
-    """Process an album: forward as a group, save one doc with aggregated media counts."""
-    album_messages.sort(key=lambda m: m.id)
-    ids = [m.id for m in album_messages]
-    logger.debug("Album detected %s grouped_ids=%s", channel, ids)
-
-    media_counts = [analyze_message_media(m) for m in album_messages]
-    media_info = merge_media_counts(media_counts)
-
-    text_parts = []
-    for m in album_messages:
-        t = m.text or m.message or ""
-        if t:
-            text_parts.append(t)
-    text_combined = "\n\n".join(text_parts)
-
-    try:
-        logger.info("Forwarding album %s count=%d first_id=%s last_id=%s", channel, len(ids), ids[0], ids[-1])
-        forwarded = await client.forward_messages(target_entity, ids, channel)
-        if isinstance(forwarded, list):
-            forwarded_ids = [f.id for f in forwarded if f] if forwarded else []
-            forwarded_id = forwarded_ids[0] if forwarded_ids else 0
-            forwarded_ids_list = forwarded_ids
-        else:
-            forwarded_id = forwarded.id if forwarded else 0
-            forwarded_ids_list = [forwarded_id] if forwarded_id else []
-    except Exception as e:
-        logger.error("Failed to forward album %s ids %s: %s", channel, ids, e)
-        return
-
-    # استخراج اطلاعات منبع برای تطابق دقیق در بات
-    raw_peer_id = album_messages[0].peer_id.channel_id
-    formatted_source_chat_id = int(f"-100{raw_peer_id}")
-
-    meta = build_message_metadata(
-        channel,
-        album_messages[0],
-        forwarded_id,
-        media_info,
-        source_message_ids=ids,
-        text_combined=text_combined,
-        album_count=len(album_messages),
-    )
-    
-    # اضافه کردن فیلدهای کلیدی برای جستجوی بات
-    meta["source_chat_id"] = formatted_source_chat_id
-    meta["source_msg_id"] = ids[0]  # اولین آیدی آلبوم ملاک است
-    
-    if len(forwarded_ids_list) > 1:
-        meta["forwarded_message_ids"] = forwarded_ids_list
-
-    logger.debug(
-        "Saving album metadata %s source_msg_id=%s",
-        channel,
-        ids[0]
-    )
-    await db.save_message(meta)
-    logger.info("Processed album %s [%s] -> %s", channel, ",".join(map(str, ids)), forwarded_id)
-
+    logger.info("Processed album %s -> %s (Source: %s)", channel, forwarded_id, meta.get("source_msg_id"))
 
 async def process_channel(client: TelegramClient, channel: str, target_entity):
     """Fetch all messages from a channel, forward each to target, save to DB."""
