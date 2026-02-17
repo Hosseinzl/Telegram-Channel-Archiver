@@ -12,6 +12,17 @@ services:
     networks:
       - archiver-net
 
+  telegram-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile.bot
+    container_name: faraz-telegram-bot
+    restart: unless-stopped
+    env_file:
+      - .env
+    networks:
+      - archiver-net
+
 networks:
   archiver-net:
     external: true

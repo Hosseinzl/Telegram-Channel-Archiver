@@ -57,6 +57,68 @@ class Database:
             return None
         return int(doc["source_message_id"])
 
+    async def update_forwarded_message(
+        self,
+        forwarded_message_id: int,
+        text: str,
+        file_ids: dict[str, Any],
+        state: str,
+    ) -> bool:
+        """
+        Update a message document by forwarded_message_id with text, file_ids, and state.
+        
+        For albums, also checks if the message_id is in forwarded_message_ids array.
+        For albums, merges file IDs instead of replacing them.
+        
+        Returns True if a document was updated, False if not found.
+        """
+        # Try exact match first
+        doc = await self.collection.find_one({"forwarded_message_id": forwarded_message_id})
+        
+        if not doc:
+            # For albums: check if this message_id is in the forwarded_message_ids array
+            doc = await self.collection.find_one({"forwarded_message_ids": forwarded_message_id})
+        
+        if not doc:
+            return False
+        
+        # For albums: merge file IDs instead of replacing
+        existing_file_ids = doc.get("file_ids", {})
+        merged_file_ids = existing_file_ids.copy() if existing_file_ids else {}
+        
+        # Merge file IDs: append lists, replace singles
+        for key, value in file_ids.items():
+            if value:  # Only merge non-empty values
+                if key == "photo_file_ids" and isinstance(value, list):
+                    # Merge photo lists (avoid duplicates)
+                    existing_photos = merged_file_ids.get("photo_file_ids", [])
+                    merged_file_ids["photo_file_ids"] = list(set(existing_photos + value))
+                elif isinstance(value, (str, int)) and value:
+                    # Replace single file IDs (video, audio, etc.)
+                    merged_file_ids[key] = value
+                elif isinstance(value, list) and value:
+                    # For other lists, merge
+                    existing = merged_file_ids.get(key, [])
+                    merged_file_ids[key] = list(set(existing + value))
+        
+        # Use provided text if it's longer (for albums, later messages might have captions)
+        final_text = text if len(text) > len(doc.get("text", "")) else doc.get("text", text)
+        
+        update_data = {
+            "text": final_text,
+            "text_length": len(final_text),
+            "file_ids": merged_file_ids,
+            "state": state,
+            "bot_processed_at": datetime.now().replace(microsecond=0, tzinfo=None),
+        }
+        
+        result = await self.collection.update_one(
+            {"_id": doc["_id"]},
+            {"$set": update_data}
+        )
+        
+        return result.modified_count > 0
+
     async def close(self):
         self.client.close()
 
