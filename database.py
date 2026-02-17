@@ -57,26 +57,29 @@ class Database:
             return None
         return int(doc["source_message_id"])
 
-    async def update_forwarded_message_by_source(self, source_chat_id, source_msg_id, **kwargs):
+    async def update_forwarded_message_by_source(self, source_chat_id, source_msg_id, file_ids, **kwargs):
         """
-        Finds a record by source_chat_id and source_msg_id and updates it.
+        Finds by direct ID or within an album list, and PUSHES file_ids instead of overwriting.
         """
-        # اطمینان از اینکه هر دو عدد هستند (نه استرینگ)
+        # کوئری هوشمند: یا آیدی اصلی باشد، یا در لیست آیدی‌های آلبوم باشد
         query = {
             "source_chat_id": int(source_chat_id),
-            "source_msg_id": int(source_msg_id)
+            "$or": [
+                {"source_msg_id": int(source_msg_id)},
+                {"source_message_ids": int(source_msg_id)} # چک کردن داخل لیست آلبوم
+            ]
         }
         
-        # چاپ کوئری برای دیباگ (اختیاری - بعد از تست پاک کنید)
-        # logger.debug(f"Searching DB with query: {query}")
+        # جدا کردن فایل آیدی برای Push کردن
+        update_data = {"$set": kwargs}
         
-        result = await self.db.messages.update_one(
-            query,
-            {"$set": kwargs}
-        )
-        
+        # به جای جایگزینی، فایل آیدی را به لیست اضافه می‌کنیم
+        if file_ids:
+            update_data["$push"] = {"collected_file_ids": file_ids}
+
+        result = await self.db.messages.update_one(query, update_data)
         return result.modified_count > 0
-   
+        
     async def update_forwarded_message(
         self,
         forwarded_message_id: int,

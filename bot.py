@@ -63,70 +63,72 @@ def extract_file_ids(message: Any) -> dict[str, Any]:
         file_ids["animation_file_id"] = message.animation.file_id
 
     return file_ids
+import asyncio
 
 async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Process incoming message: extract text/file IDs and update DB."""
-    message = update.message
+    """اصلاح شده: پردازش هوشمند پیام‌های تکی و آلبوم‌ها"""
+    message = update.effective_message
     
-    if not message:
-        return
-    
-    # محدود کردن به گروه هدف
-    chat_id = message.chat_id
-    if chat_id != TARGET_GROUP:
-        logger.debug("Ignoring message from chat %s", chat_id)
+    if not message or message.chat_id != TARGET_GROUP:
         return
 
-    # استخراج اطلاعات فوروارد (نقطه اتصال با تلثون)
+    # ۱. استخراج اطلاعات فوروارد (پل ارتباطی ما با تلثون)
     if not message.forward_origin or not isinstance(message.forward_origin, MessageOriginChannel):
-        logger.debug("Message %s is not a forwarded channel message, skipping", message.message_id)
         return
 
     source_chat_id = message.forward_origin.chat.id
     source_msg_id = message.forward_origin.message_id
     bot_message_id = message.message_id
 
-    logger.info("Processing message %s (Source: %s, Msg: %s)", bot_message_id, source_chat_id, source_msg_id)
-    
-    # استخراج محتوا
+    # ۲. استخراج محتوا (متن و فایل آیدی)
     text = message.text or message.caption or ""
     file_ids = extract_file_ids(message)
     
-    has_content = bool(text) or any(
-        file_ids.get(k) for k in file_ids.keys()
-        if isinstance(file_ids.get(k), (str, list)) and file_ids.get(k)
-    )
-    
-    if not has_content:
+    # ۳. فیلتر کردن پیام‌های فاقد محتوا
+    has_file = any(v for v in file_ids.values() if v)
+    if not text and not has_file:
         return
-    
-    # وقفه کوتاه برای اطمینان از اینکه تلثون قبلاً رکورد را ساخته است
-    time.sleep(1)
+
+    # ۴. وقفه هوشمند (Non-blocking)
+    # اگر آلبوم باشد، پیام‌ها خیلی سریع می‌آیند؛ کمی صبر می‌کنیم تا تلثون کارش تمام شود
+    wait_time = 1.5 if message.media_group_id else 0.8
+    await asyncio.sleep(wait_time)
+
+    logger.info(f"🔍 Searching DB for Source: {source_chat_id} | Msg: {source_msg_id}")
     
     try:
-        # جستجو و آپدیت بر اساس اطلاعات منبع (نه آیدی فوروارد)
+        # ۵. تلاش برای آپدیت رکورد در مونگو
+        # نکته: متد update_forwarded_message_by_source باید از $push برای فایل آیدی استفاده کند
         updated = await db.update_forwarded_message_by_source(
             source_chat_id=source_chat_id,
             source_msg_id=source_msg_id,
-            text=text,
-            file_ids=file_ids,
-            bot_message_id=bot_message_id, # ذخیره آیدی جدید بات برای مراجعات بعدی
+            file_ids=file_ids,         # به صورت لیست در دیتابیس Push می‌شود
+            bot_text=text,             # کپشن دریافتی توسط بات
+            last_bot_msg_id=bot_message_id,
             state="completed"
         )
         
         if updated:
-            logger.info(
-                "Successfully matched and updated source %s/%s with Bot ID %s",
-                source_chat_id, source_msg_id, bot_message_id
-            )
+            logger.info(f"✅ DB Updated: Source {source_msg_id} -> Bot ID {bot_message_id}")
         else:
-            logger.warning(
-                "DB Mapping failed for source %s/%s (No matching record found)",
-                source_chat_id, source_msg_id
+            # اگر بار اول پیدا نشد، یک شانس مجدد با تاخیر بیشتر (مخصوص سرورهای کند)
+            await asyncio.sleep(2)
+            retry_updated = await db.update_forwarded_message_by_source(
+                source_chat_id=source_chat_id,
+                source_msg_id=source_msg_id,
+                file_ids=file_ids,
+                bot_text=text,
+                last_bot_msg_id=bot_message_id,
+                state="completed"
             )
-    except Exception as e:
-        logger.exception("Error in DB update for message %s: %s", bot_message_id, e)
+            if retry_updated:
+                logger.info(f"♻️ DB Updated on Retry: {source_msg_id}")
+            else:
+                logger.warning(f"❌ DB Mapping failed for source {source_chat_id}/{source_msg_id}")
 
+    except Exception as e:
+        logger.error(f"⚠️ Error updating DB for bot message {bot_message_id}: {str(e)}")
+        
 async def main():
     """Start the bot."""
     import os
