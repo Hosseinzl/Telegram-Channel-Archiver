@@ -87,7 +87,7 @@ class Database:
         result = await self.db.messages.update_many(query, update_op)
         
         if result.matched_count > 0:
-            logger.info(f"✅ DB Update Many: Matched {result.matched_count}, Modified {result.modified_count}")
+            print(f"✅ DB Update Many: Matched {result.matched_count}, Modified {result.modified_count}")
         
         return result.matched_count > 0
 
