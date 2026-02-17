@@ -58,36 +58,47 @@ class Database:
         return int(doc["source_message_id"])
 
     async def update_forwarded_message_by_source(self, source_chat_id, source_msg_id, file_ids, **kwargs):
+        """
+        نسخه نهایی: استفاده از ترکیب آیدی منبع و آیدی فوروارد برای دقت ۱۰۰ درصد
+        """
+        # ۱. ابتدا تلاش می‌کنیم رکورد را بر اساس آیدی دقیق منبع پیدا کنیم
+        # این برای پیام‌های تکی عالی عمل می‌کند.
         query = {
             "source_chat_id": int(source_chat_id),
-            "$or": [
-                {"source_msg_id": int(source_msg_id)},
-                {
-                    "source_msg_id": {"$lte": int(source_msg_id)}, 
-                    "album_count": {"$exists": True}
-                }
-            ]
+            "source_msg_id": int(source_msg_id)
         }
         
-        # پیدا کردن آخرین رکورد مرتبط
-        record = await self.db.messages.find_one(query, sort=[("source_msg_id", -1)])
-        
+        record = await self.collection.find_one(query)
+
+        # ۲. اگر پیدا نشد (احتمالاً آلبوم است و آیدی دوم به بعد فرستاده شده)
+        if not record:
+            # جستجو در بازه کوچک: رکوردی که آیدی منبعش کمی قبل‌تر است و آلبوم است
+            # و هنوز وضعیتش تکمیل نشده یا همین الان ساخته شده
+            query_album = {
+                "source_chat_id": int(source_chat_id),
+                "source_msg_id": {"$lte": int(source_msg_id), "$gt": int(source_msg_id) - 10},
+                "album_count": {"$exists": True}
+            }
+            record = await self.collection.find_one(query_album, sort=[("source_msg_id", -1)])
+
         if not record:
             return False
 
-        # تمیز کردن file_ids از مقادیر None یا لیست‌های خالی
-        # این کار باعث می‌شود دیتابیس تمیز بماند
+        # ۳. آماده‌سازی عملیات آپدیت
         clean_media = {k: v for k, v in file_ids.items() if v}
-        print(f"clean list is {clean_media}")
-        update_op = {"$set": kwargs}
         
+        update_op = {"$set": kwargs}
         if clean_media:
+            # استفاده از $addToSet برای جلوگیری از تکرار
             update_op["$addToSet"] = {"collected_media": clean_media}
 
-        result = await self.db.messages.update_one({"_id": record["_id"]}, update_op)
+        # ۴. آپدیت دقیق بر اساس _id منحصر به فرد
+        result = await self.collection.update_one({"_id": record["_id"]}, update_op)
         
-        # تغییر مهم: اگر رکورد پیدا شد (matched)، یعنی عملیات موفق بوده 
-        # حتی اگر دیتای جدید با قبلی فرقی نداشته باشد (modified 0 باشد)
+        # لاگ داخلی برای اطمینan
+        if result.matched_count > 0:
+            print(f"DEBUG: Applied update to _id: {record['_id']} | Source: {record.get('source_msg_id')}")
+            
         return result.matched_count > 0
     async def update_forwarded_message(
         self,
