@@ -78,7 +78,7 @@ class Database:
         # تمیز کردن file_ids از مقادیر None یا لیست‌های خالی
         # این کار باعث می‌شود دیتابیس تمیز بماند
         clean_media = {k: v for k, v in file_ids.items() if v}
-
+        print(f"clean list is {clean_media}")
         update_op = {"$set": kwargs}
         
         if clean_media:
