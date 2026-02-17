@@ -83,7 +83,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # ۲. استخراج محتوا (متن و فایل آیدی)
     text = message.text or message.caption or ""
     file_ids = extract_file_ids(message)
-    
+    print(f"file ids:{file_ids}")
     # ۳. فیلتر کردن پیام‌های فاقد محتوا
     has_file = any(v for v in file_ids.values() if v)
     if not text and not has_file:
@@ -128,7 +128,7 @@ async def process_message(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     except Exception as e:
         logger.error(f"⚠️ Error updating DB for bot message {bot_message_id}: {str(e)}")
-        
+
 async def main():
     """Start the bot."""
     import os

@@ -69,19 +69,26 @@ class Database:
             ]
         }
         
-        # اول پیدا کردن رکورد با سورت دستی
+        # پیدا کردن آخرین رکورد مرتبط
         record = await self.db.messages.find_one(query, sort=[("source_msg_id", -1)])
         
         if not record:
             return False
 
-        # حالا آپدیت همان رکورد با آیدی دقیق خودش
+        # تمیز کردن file_ids از مقادیر None یا لیست‌های خالی
+        # این کار باعث می‌شود دیتابیس تمیز بماند
+        clean_media = {k: v for k, v in file_ids.items() if v}
+
         update_op = {"$set": kwargs}
-        if file_ids and any(file_ids.values()):
-            update_op["$addToSet"] = {"collected_media": file_ids}
+        
+        if clean_media:
+            update_op["$addToSet"] = {"collected_media": clean_media}
 
         result = await self.db.messages.update_one({"_id": record["_id"]}, update_op)
-        return result.modified_count > 0
+        
+        # تغییر مهم: اگر رکورد پیدا شد (matched)، یعنی عملیات موفق بوده 
+        # حتی اگر دیتای جدید با قبلی فرقی نداشته باشد (modified 0 باشد)
+        return result.matched_count > 0
     async def update_forwarded_message(
         self,
         forwarded_message_id: int,
