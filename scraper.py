@@ -185,6 +185,41 @@ def build_message_metadata(
         meta["album_count"] = album_count
     
     return meta
+
+async def _fetch_album_messages(
+    client: TelegramClient, 
+    channel: str, 
+    grouped_id: int, 
+    known_message_id: int
+) -> list:
+    """
+    Fetch all messages in an album. 
+    Telegram albums can have up to 10 items.
+    """
+    logger.debug(
+        "Fetching album window %s grouped_id=%s around_message=%s",
+        channel,
+        grouped_id,
+        known_message_id,
+    )
+    
+    # گرفتن پیام‌های اطراف برای اطمینان از جمع‌آوری کل آلبوم
+    # معمولاً آلبوم‌ها پشت سر هم هستند، پس بازه ۵۰ تایی کاملاً امن است
+    messages = await client.get_messages(
+        channel, 
+        min_id=known_message_id - 40, 
+        max_id=known_message_id + 10
+    )
+    
+    # فیلتر کردن پیام‌هایی که متعلق به این آلبوم هستند
+    album = [
+        m for m in messages 
+        if m and getattr(m, "grouped_id", None) == grouped_id
+    ]
+    
+    # مرتب‌سازی بر اساس آیدی برای حفظ ترتیب درست نمایش در فوروارد
+    return sorted(album, key=lambda m: m.id)
+
 async def _process_album(
     client: TelegramClient,
     channel: str,
@@ -305,7 +340,7 @@ async def process_channel(client: TelegramClient, channel: str, target_entity):
         logger.info("Channel done %s", channel)
     except Exception as e:
         logger.exception("Error processing channel %s: %s", channel, e)
-        
+
 async def run():
     """Main agent loop."""
     if not API_ID or not API_HASH:
