@@ -116,7 +116,6 @@ def merge_media_counts(counts_list: list[dict[str, Any]]) -> dict[str, Any]:
         merged["web_page"] = merged["web_page"] or c.get("web_page", False)
     return merged
 
-
 def build_message_metadata(
     channel: str,
     message,
@@ -127,37 +126,43 @@ def build_message_metadata(
     text_combined: str = "",
     album_count: int = 0,
 ) -> dict[str, Any]:
-    """Build the document to save in MongoDB."""
+    """Build the document to save in MongoDB with foolproof source tracking."""
     
-    # پیش‌فرض: فرض می‌کنیم پیام مستقیم است
-    raw_peer_id = getattr(message.peer_id, "channel_id", 0)
-    source_msg_id = message.id
-    
-    # چک کردن دقیق فوروارد
-    # در تلثون fwd_from حاوی اطلاعات فوروارد است
-    if message.fwd_from:
-        fwd = message.fwd_from
-        # اگر از یک کانال فوروارد شده باشد
-        if fwd.from_id and hasattr(fwd.from_id, 'channel_id'):
-            raw_peer_id = fwd.from_id.channel_id
-            source_msg_id = fwd.channel_post
-        # اگر از یک کاربر یا چت فوروارد شده باشد (اختیاری)
-        elif fwd.from_id:
-            # اگر نیاز دارید فورواردهای شخصی را هم بگیرید اینجا اضافه کنید
-            pass
+    # 1. تشخیص منبع (Source Chat & Source Message ID)
+    # چک می‌کنیم آیا پیام از جای دیگری فوروارد شده یا خیر
+    if message.fwd_from and message.fwd_from.from_id and hasattr(message.fwd_from.from_id, 'channel_id'):
+        # سناریو الف: پیام فورواردی است (مثلاً از ورزش 3 به کانال تست)
+        # اطلاعات منبع اصلی را برمی‌داریم تا با چیزی که بات می‌بیند ست شود
+        raw_peer_id = message.fwd_from.from_id.channel_id
+        source_msg_id = message.fwd_from.channel_post
+    else:
+        # سناریو ب: پیام مستقیم در کانال تست پست شده یا فوروارد مخفی است
+        # اطلاعات خود کانال تست را برمی‌داریم
+        raw_peer_id = getattr(message.peer_id, "channel_id", 0)
+        source_msg_id = message.id
 
-    formatted_source_chat_id = int(f"-100{raw_peer_id}") if raw_peer_id else None
+    # استانداردسازی آیدی کانال برای مطابقت با Bot API
+    # آیدی‌های کانال در تلگرام همیشه با -100 شروع می‌شوند
+    if raw_peer_id:
+        str_peer_id = str(raw_peer_id)
+        if not str_peer_id.startswith("-100"):
+            formatted_source_chat_id = int(f"-100{raw_peer_id}")
+        else:
+            formatted_source_chat_id = int(raw_peer_id)
+    else:
+        formatted_source_chat_id = None
 
-    # تعیین آیدی داخلی برای دیتابیس
+    # 2. تعیین محتوا و آیدی‌های داخلی
     internal_id = source_message_ids[0] if source_message_ids else message.id
     text = text_combined if source_message_ids else (message.text or message.message or "")
 
+    # 3. ساخت داکیومنت نهایی
     meta = {
         "channel": channel,
-        "source_chat_id": formatted_source_chat_id, 
-        "source_msg_id": source_msg_id,            # این همان 290740 خواهد شد
-        "internal_source_id": internal_id,        # این همان 28 (کانال تست) می‌ماند
-        "source_message_id": internal_id,
+        "source_chat_id": formatted_source_chat_id, # شناسنامه کانال (ورزش 3 یا تست)
+        "source_msg_id": source_msg_id,            # شناسنامه پیام (290740 یا 32)
+        "internal_source_id": internal_id,        # آیدی در کانال واسط شما
+        "source_message_id": internal_id,         # برای سازگاری با کدهای قدیمی
         "source_date": message.date.isoformat() if message.date else None,
         "fetch_date": datetime.utcnow().isoformat(),
         "forwarded_message_id": forwarded_message_id,
@@ -165,8 +170,15 @@ def build_message_metadata(
         "media": media_info,
         "text_length": len(text),
         "text_preview": text[:500] if text else None,
+        "has_reply": message.reply_to is not None,
+        "has_edit_date": message.edit_date is not None,
+        "views": getattr(message, "views", None),
+        "forwards": getattr(message, "forwards", None),
     }
-    print(meta)
+
+    # چاپ برای دیباگ در کنسول تلثون
+    print(f"DEBUG SCRAPER: Source {formatted_source_chat_id} | Msg {source_msg_id}")
+    
     if message.grouped_id:
         meta["grouped_id"] = message.grouped_id
     if source_message_ids is not None:
