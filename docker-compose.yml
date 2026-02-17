@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   channel-archiver:
     build:
@@ -10,7 +8,8 @@ services:
     env_file:
       - .env
     environment:
-      - MONGODB_URI=mongodb://host.docker.internal:27017
+      - MONGODB_URI=mongodb://127.0.0.1:27017
       - SESSION_PATH=/data
     volumes:
       - ./session_data:/data
+    network_mode: "host"
