@@ -59,27 +59,44 @@ class Database:
 
     async def update_forwarded_message_by_source(self, source_chat_id, source_msg_id, file_ids, **kwargs):
         """
-        Finds by direct ID or within an album list, and PUSHES file_ids instead of overwriting.
+        نسخه اصلاح شده برای هندل کردن آلبوم‌ها و جلوگیری از پاک شدن دیتا
         """
-        # کوئری هوشمند: یا آیدی اصلی باشد، یا در لیست آیدی‌های آلبوم باشد
+        # ۱. کوئری هوشمند:
+        # یا آیدی مستقیم پیام است
+        # یا اگر آلبوم است، چون تلگرام آیدی پیام‌های بعدی آلبوم را به ترتیب می‌فرستد،
+        # ما چک می‌کنیم که آیدی ارسالی بات، در بازه [آیدی اول آلبوم تا آیدی اول + تعداد] باشد.
+        
         query = {
             "source_chat_id": int(source_chat_id),
             "$or": [
                 {"source_msg_id": int(source_msg_id)},
-                {"source_message_ids": int(source_msg_id)} # چک کردن داخل لیست آلبوم
+                {
+                    "source_msg_id": {"$lte": int(source_msg_id)}, 
+                    "album_count": {"$exists": True}
+                }
             ]
         }
         
-        # جدا کردن فایل آیدی برای Push کردن
-        update_data = {"$set": kwargs}
+        # ۲. آماده‌سازی عملیات آپدیت
+        # از $set برای متن و وضعیت استفاده می‌کنیم
+        # از $addToSet برای فایل آیدی استفاده می‌کنیم تا تکراری ذخیره نشود
         
-        # به جای جایگزینی، فایل آیدی را به لیست اضافه می‌کنیم
-        if file_ids:
-            update_data["$push"] = {"collected_file_ids": file_ids}
+        update_op = {
+            "$set": kwargs,
+        }
+        
+        # اضافه کردن فایل آیدی به یک لیست (جایگزین نمی‌شود، اضافه می‌شود)
+        if file_ids and any(file_ids.values()):
+            update_op["$addToSet"] = {"collected_media": file_ids}
 
-        result = await self.db.messages.update_one(query, update_data)
-        return result.modified_count > 0
+        # مرتب‌سازی بر اساس آیدی (نزولی) تا آخرین آلبوم مرتبط را پیدا کند
+        result = await self.db.messages.update_one(
+            query, 
+            update_op,
+            sort=[("source_msg_id", -1)] 
+        )
         
+        return result.modified_count > 0
     async def update_forwarded_message(
         self,
         forwarded_message_id: int,
