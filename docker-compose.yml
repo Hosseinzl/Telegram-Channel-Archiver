@@ -13,7 +13,4 @@ services:
       - MONGODB_URI=mongodb://host.docker.internal:27017
       - SESSION_PATH=/data
     volumes:
-      - session_data:/data
-
-volumes:
-  session_data:
+      - ./session_data:/data
