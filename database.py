@@ -76,6 +76,7 @@ class Database:
         )
         
         return result.modified_count > 0
+   
     async def update_forwarded_message(
         self,
         forwarded_message_id: int,

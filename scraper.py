@@ -92,7 +92,6 @@ def analyze_message_media(message) -> dict[str, Any]:
 
     return counts
 
-
 def merge_media_counts(counts_list: list[dict[str, Any]]) -> dict[str, Any]:
     """Merge media counts from multiple messages (e.g. album) by summing."""
     merged = {
@@ -246,17 +245,18 @@ async def process_channel(client: TelegramClient, channel: str, target_entity):
     try:
         last_id = await db.get_last_source_message_id(channel)
         
-        # بخش دریافت پیام‌ها (چه در First Run چه در Iteration)
+        # تعیین لیست پیام‌ها برای اجرای اول (First Run)
         if last_id is None:
             backlog_limit = int(os.getenv("FIRST_RUN_BACKLOG_LIMIT", "5"))
             messages = await client.get_messages(channel, limit=backlog_limit)
             messages = [m for m in messages if m]
             messages.sort(key=lambda m: m.id)
         else:
-            messages = [] # در حالت iter_messages مستقیماً هندل می‌شود
+            messages = [] 
 
-        # تابع کمکی برای پردازش هر پیام (جلوگیری از تکرار کد)
+        # تابع کمکی برای پردازش هر پیام
         async def handle_single_message(message):
+            # ۱. بررسی تکراری بودن (آلبوم یا پیام تکی)
             if message.grouped_id:
                 if await db.grouped_exists(channel, message.grouped_id) or await db.message_exists(channel, message.id):
                     return False
@@ -269,27 +269,29 @@ async def process_channel(client: TelegramClient, channel: str, target_entity):
             if await db.message_exists(channel, message.id):
                 return False
 
+            # ۲. آنالیز رسانه
             media_info = analyze_message_media(message)
+
+            # ۳. فوروارد پیام به مقصد
             try:
                 forwarded = await client.forward_messages(target_entity, message.id, channel)
+                # استخراج آیدی پیام فوروارد شده در مقصد
                 f_id = forwarded[0].id if isinstance(forwarded, list) else (forwarded.id if forwarded else 0)
             except Exception as e:
                 logger.error("Failed to forward %s/%s: %s", channel, message.id, e)
                 return False
 
-            # ذخیره متادیتا با اطلاعات منبع
-            raw_id = message.peer_id.channel_id
-            formatted_src_chat_id = int(f"-100{raw_id}")
-
+            # ۴. ساخت و ذخیره متادیتا (اصلاح شده)
+            # نکته: دیگر source_chat_id و source_msg_id را دستی ست نمی‌کنیم
+            # تا تابع زیر بتواند منبع اصلی (مثلا ورزش ۳) را به درستی شناسایی کند.
             meta = build_message_metadata(channel, message, f_id, media_info)
-            meta["source_chat_id"] = formatted_src_chat_id
-            meta["source_msg_id"] = message.id
             
             await db.save_message(meta)
-            logger.info("Processed %s/%s -> %s", channel, message.id, f_id)
+            logger.info("Processed %s/%s -> %s (Source: %s)", 
+                        channel, message.id, f_id, meta.get('source_msg_id'))
             return True
 
-        # اجرای پردازش برای پیام‌ها
+        # ۵. اجرای حلقه پردازش
         if last_id is None:
             for m in messages:
                 if await handle_single_message(m):
@@ -303,7 +305,7 @@ async def process_channel(client: TelegramClient, channel: str, target_entity):
         logger.info("Channel done %s", channel)
     except Exception as e:
         logger.exception("Error processing channel %s: %s", channel, e)
-
+        
 async def run():
     """Main agent loop."""
     if not API_ID or not API_HASH:
