@@ -1,8 +1,7 @@
-"""Telethon agent: fetches messages from channels, forwards to group, saves to MongoDB."""
-
 import asyncio
 import logging
 from datetime import datetime
+import os
 from typing import Any
 
 from telethon import TelegramClient
@@ -377,7 +376,6 @@ async def run():
         finally:
             logger.info("Shutting down; closing DB connection")
             await db.close()
-
 
 def main():
     asyncio.run(run())

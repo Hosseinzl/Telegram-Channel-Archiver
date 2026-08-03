@@ -1,5 +1,3 @@
-"""Entry point for the Telegram channel archiver agent."""
-
 import asyncio
 import sys
 

@@ -60,10 +60,7 @@ class Database:
     from datetime import datetime, timedelta
 
     async def update_forwarded_message_by_source(self, source_chat_id, source_msg_id, file_ids, **kwargs):
-        """
-        آپدیت گروهی برای اطمینان از اعمال تغییرات روی داکیومنت صحیح
-        """
-        
+
         query = {
             "source_chat_id": int(source_chat_id),
             "$or": [

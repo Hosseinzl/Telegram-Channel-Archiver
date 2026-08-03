@@ -1,27 +1,35 @@
 services:
-  channel-archiver:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: faraz-channel-archiver
+  mongo:
+    image: mongo:8.0
+    container_name: mongodb
     restart: unless-stopped
+
+    ports:
+      - "127.0.0.1:27017:27017"
+
     env_file:
       - .env
+
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: ${MONGO_ROOT_USERNAME}
+      MONGO_INITDB_ROOT_PASSWORD: ${MONGO_ROOT_PASSWORD}
+
     volumes:
-      - ./session_data:/data
+      - mongo_data:/data/db
+      - mongo_config:/data/configdb
+
     networks:
       - archiver-net
 
-  telegram-bot:
-    build:
-      context: .
-      dockerfile: Dockerfile.bot
-    container_name: faraz-telegram-bot
-    restart: unless-stopped
-    env_file:
-      - .env
-    networks:
-      - archiver-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  mongo_data:
+  mongo_config:
 
 networks:
   archiver-net:
