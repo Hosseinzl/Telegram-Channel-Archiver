@@ -272,6 +272,42 @@ async def _process_album(
     await db.save_message(meta)
     logger.info("Processed album %s -> %s (Source: %s)", channel, forwarded_id, meta.get("source_msg_id"))
 
+async def handle_single_message(message, channel: str, client: TelegramClient, target_entity):
+    # ۱. بررسی تکراری بودن (آلبوم یا پیام تکی)
+    if message.grouped_id:
+        if await db.grouped_exists(channel, message.grouped_id) or await db.message_exists(channel, message.id):
+            return False
+        album = await _fetch_album_messages(client, channel, message.grouped_id, message.id)
+        if album:
+            await _process_album(client, channel, target_entity, album)
+            return True
+        return False
+
+    if await db.message_exists(channel, message.id):
+        return False
+
+    # ۲. آنالیز رسانه
+    media_info = analyze_message_media(message)
+
+        # ۳. فوروارد پیام به مقصد
+    try:
+        forwarded = await client.forward_messages(target_entity, message.id, channel)
+        # استخراج آیدی پیام فوروارد شده در مقصد
+        f_id = forwarded[0].id if isinstance(forwarded, list) else (forwarded.id if forwarded else 0)
+    except Exception as e:
+        logger.error("Failed to forward %s/%s: %s", channel, message.id, e)
+        return False
+
+    # ۴. ساخت و ذخیره متادیتا (اصلاح شده)
+    # نکته: دیگر source_chat_id و source_msg_id را دستی ست نمی‌کنیم
+    # تا تابع زیر بتواند منبع اصلی (مثلا ورزش ۳) را به درستی شناسایی کند.
+    meta = build_message_metadata(channel, message, f_id, media_info)
+            
+    await db.save_message(meta)
+    logger.info("Processed %s/%s -> %s (Source: %s)", 
+                    channel, message.id, f_id, meta.get('source_msg_id'))
+    return True
+
 async def process_channel(client: TelegramClient, channel: str, target_entity):
     """Fetch all messages from a channel, forward each to target, save to DB."""
     logger.info("Processing channel: %s", channel)
@@ -288,47 +324,10 @@ async def process_channel(client: TelegramClient, channel: str, target_entity):
         else:
             messages = [] 
 
-        # تابع کمکی برای پردازش هر پیام
-        async def handle_single_message(message):
-            # ۱. بررسی تکراری بودن (آلبوم یا پیام تکی)
-            if message.grouped_id:
-                if await db.grouped_exists(channel, message.grouped_id) or await db.message_exists(channel, message.id):
-                    return False
-                album = await _fetch_album_messages(client, channel, message.grouped_id, message.id)
-                if album:
-                    await _process_album(client, channel, target_entity, album)
-                    return True
-                return False
-
-            if await db.message_exists(channel, message.id):
-                return False
-
-            # ۲. آنالیز رسانه
-            media_info = analyze_message_media(message)
-
-            # ۳. فوروارد پیام به مقصد
-            try:
-                forwarded = await client.forward_messages(target_entity, message.id, channel)
-                # استخراج آیدی پیام فوروارد شده در مقصد
-                f_id = forwarded[0].id if isinstance(forwarded, list) else (forwarded.id if forwarded else 0)
-            except Exception as e:
-                logger.error("Failed to forward %s/%s: %s", channel, message.id, e)
-                return False
-
-            # ۴. ساخت و ذخیره متادیتا (اصلاح شده)
-            # نکته: دیگر source_chat_id و source_msg_id را دستی ست نمی‌کنیم
-            # تا تابع زیر بتواند منبع اصلی (مثلا ورزش ۳) را به درستی شناسایی کند.
-            meta = build_message_metadata(channel, message, f_id, media_info)
-            
-            await db.save_message(meta)
-            logger.info("Processed %s/%s -> %s (Source: %s)", 
-                        channel, message.id, f_id, meta.get('source_msg_id'))
-            return True
-
         # ۵. اجرای حلقه پردازش
         if last_id is None:
             for m in messages:
-                if await handle_single_message(m):
+                if await handle_single_message(m, channel, client, target_entity):
                     await asyncio.sleep(1)
         else:
             async for m in client.iter_messages(channel, min_id=last_id):
