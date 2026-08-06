@@ -206,24 +206,15 @@ async def sync_destination_channels(client: TelegramClient) -> None:
 
         live_username = getattr(live_entity, "username", None)
         live_title = getattr(live_entity, "title", None)
-        bot_status = "active" if getattr(live_entity, "broadcast", True) else "unknown"
-        can_post_messages = bool(getattr(live_entity, "can_post_messages", True))
-        is_bot_member = True
-        is_bot_admin = bool(getattr(live_entity, "admin_rights", None))
 
         if (
             live_username != destination_channel.get("channel_username")
             or live_title != destination_channel.get("title")
         ):
-            await db.update_destination_channel_status(
+            await db.update_destination_channel_identity(
                 channel_id,
                 channel_username=live_username,
                 title=live_title,
-                bot_status=bot_status,
-                is_bot_member=is_bot_member,
-                is_bot_admin=is_bot_admin,
-                can_post_messages=can_post_messages,
-                validation_status=destination_channel.get("validation_status", "valid"),
             )
 
 
@@ -316,7 +307,7 @@ async def can_fetch() -> bool:
 
         data = resp.json()
 
-        return data.get("status") == "ok"
+        return data.get("ready") is True
 
     except Exception:
         logger.exception("Permission API failed")

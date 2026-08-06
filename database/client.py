@@ -673,6 +673,27 @@ class Database:
 
         return result.modified_count > 0
 
+    async def update_destination_channel_identity(
+        self,
+        channel_id: str,
+        *,
+        channel_username: str | None,
+        title: str | None,
+    ) -> bool:
+        """Update only the destination channel identity fields."""
+
+        update_fields = {
+            "channel_username": channel_username,
+            "title": title,
+        }
+
+        result = await self.destination_channels.update_one(
+            {"channel_id": channel_id},
+            {"$set": update_fields},
+        )
+
+        return result.modified_count > 0
+
     # ── Aggregate / stats ─────────────────────────────────────────────────────
 
     async def get_stats(
