@@ -486,7 +486,7 @@ async def run():
     # How often to poll channels for new messages (in seconds).
     poll_interval = POLL_INTERVAL
     channel_sync_interval = CHANNEL_SYNC_INTERVAL
-    logger.info("Starting scraper channels=%d target_group=%s poll_interval=%ss", len(CHANNELS), TARGET_GROUP, poll_interval)
+    logger.info("Starting scraper channels=%d poll_interval=%ss", TARGET_GROUP, poll_interval)
 
     async with client:
         me = await client.get_me()
