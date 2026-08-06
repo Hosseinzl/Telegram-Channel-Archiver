@@ -488,13 +488,15 @@ async def run():
     channel_sync_interval = CHANNEL_SYNC_INTERVAL
     logger.info("Starting scraper channels=%d poll_interval=%ss", TARGET_GROUP, poll_interval)
 
-    async with client:
-        me = await client.get_me()
-        logger.info("Logged in as %s (%s)", getattr(me, "username", None), getattr(me, "id", None))
-        target_entity = await client.get_input_entity(TARGET_GROUP)
-        logger.info("Resolved target entity: %s", TARGET_GROUP)
+    try:
+        await db.connect()
 
-        try:
+        async with client:
+            me = await client.get_me()
+            logger.info("Logged in as %s (%s)", getattr(me, "username", None), getattr(me, "id", None))
+            target_entity = await client.get_input_entity(TARGET_GROUP)
+            logger.info("Resolved target entity: %s", TARGET_GROUP)
+
             last_channel_sync = 0.0
             while True:
                 logger.debug("Poll cycle start")
@@ -519,9 +521,9 @@ async def run():
 
                 logger.debug("Poll cycle done")
                 await asyncio.sleep(poll_interval)
-        finally:
-            logger.info("Shutting down; closing DB connection")
-            await db.close()
+    finally:
+        logger.info("Shutting down; closing DB connection")
+        await db.close()
 
 def main():
     asyncio.run(run())
