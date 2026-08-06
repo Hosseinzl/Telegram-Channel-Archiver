@@ -410,7 +410,15 @@ async def process_channel(client: TelegramClient, channel_id, target_entity):
         
         # تعیین لیست پیام‌ها برای اجرای اول (First Run)
         if last_id is None:
-            messages = await client.get_messages(channel_id, limit=FIRST_RUN_BACKLOG_LIMIT)
+            entity = await _safe_get_entity(client, str(channel_id))
+
+            if entity is None:
+                raise ValueError(f"Cannot resolve channel entity: {channel_id}")
+
+            messages = await client.get_messages(
+                entity,
+                limit=FIRST_RUN_BACKLOG_LIMIT
+            )
             messages = [m for m in messages if m]
             messages.sort(key=lambda m: m.id)
         else:
