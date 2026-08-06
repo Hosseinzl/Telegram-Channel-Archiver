@@ -364,6 +364,12 @@ async def _process_album(
     album_messages: list,
 ) -> None:
     """Process an album correctly without overwriting original source info."""
+    source_entity = await _safe_get_entity(client, str(channel_id))
+
+    if source_entity is None:
+        logger.error("Cannot resolve source entity: %s", channel_id)
+        return
+
     album_messages.sort(key=lambda m: m.id)
     ids = [m.id for m in album_messages]
     
@@ -378,17 +384,22 @@ async def _process_album(
     text_combined = "\n\n".join(text_parts)
 
     try:
-        forwarded = await client.forward_messages(target_entity, ids, channel_id)
+        forwarded = await client.forward_messages(
+            target_entity,
+            ids,
+            source_entity,
+        )
+
         if isinstance(forwarded, list):
             forwarded_ids = [f.id for f in forwarded if f] if forwarded else []
             forwarded_id = forwarded_ids[0] if forwarded_ids else 0
         else:
             forwarded_id = forwarded.id if forwarded else 0
             forwarded_ids = [forwarded_id] if forwarded_id else []
+
     except Exception as e:
         logger.error("Failed to forward album %s: %s", channel_id, e)
         return
-
     # --- اصلاح اصلی اینجاست ---
     # فقط تابع را صدا می‌زنیم. این تابع خودش هوشمند است و 
     # اگر آلبوم فورواردی باشد، آیدی منبع اصلی (ورزش 3) را برمی‌دارد.
@@ -416,17 +427,18 @@ async def process_channel(client: TelegramClient, channel_id, target_entity):
     logger.info("Processing channel: %s", channel_id)
 
     try:
+        source_entity = await _safe_get_entity(client, str(channel_id))
+        if source_entity is None:
+            logger.error("Cannot resolve source entity: %s", channel_id)
+            return
+
         last_id = await db.get_last_telegram_message_id(channel_id)
         
         # تعیین لیست پیام‌ها برای اجرای اول (First Run)
         if last_id is None:
-            entity = await _safe_get_entity(client, str(channel_id))
-
-            if entity is None:
-                raise ValueError(f"Cannot resolve channel entity: {channel_id}")
 
             messages = await client.get_messages(
-                entity,
+                source_entity,
                 limit=FIRST_RUN_BACKLOG_LIMIT
             )
             messages = [m for m in messages if m]
@@ -454,13 +466,26 @@ async def process_channel(client: TelegramClient, channel_id, target_entity):
 
             # ۳. فوروارد پیام به مقصد
             try:
-                forwarded = await client.forward_messages(target_entity, message.id, channel_id)
-                # استخراج آیدی پیام فوروارد شده در مقصد
-                f_id = forwarded[0].id if isinstance(forwarded, list) else (forwarded.id if forwarded else 0)
-            except Exception as e:
-                logger.error("Failed to forward %s/%s: %s", channel_id, message.id, e)
-                return False
+                forwarded = await client.forward_messages(
+                    target_entity,
+                    message.id,
+                    source_entity,
+                )
 
+                f_id = (
+                    forwarded[0].id
+                    if isinstance(forwarded, list)
+                    else (forwarded.id if forwarded else 0)
+                )
+
+            except Exception as e:
+                logger.error(
+                    "Failed to forward %s/%s: %s",
+                    channel_id,
+                    message.id,
+                    e,
+                )
+                return False
             # ۴. ساخت و ذخیره متادیتا (اصلاح شده)
             # نکته: دیگر source_chat_id و source_msg_id را دستی ست نمی‌کنیم
             # تا تابع زیر بتواند منبع اصلی (مثلا ورزش ۳) را به درستی شناسایی کند.
