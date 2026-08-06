@@ -512,8 +512,13 @@ async def process_channel(client: TelegramClient, channel_id, target_entity):
                 if await handle_single_message(m):
                     await asyncio.sleep(1)
         else:
-            async for m in client.iter_messages(channel_id, min_id=last_id):
-                if not m: continue
+            async for m in client.iter_messages(
+                source_entity,
+                min_id=last_id,
+            ):
+                if not m:
+                    continue
+
                 if await handle_single_message(m):
                     await asyncio.sleep(1)
 
