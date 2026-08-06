@@ -332,10 +332,20 @@ async def _fetch_album_messages(
     
     # گرفتن پیام‌های اطراف برای اطمینان از جمع‌آوری کل آلبوم
     # معمولاً آلبوم‌ها پشت سر هم هستند، پس بازه ۵۰ تایی کاملاً امن است
+
+    entity = await _safe_get_entity(client, str(channel_id))
+
+    if entity is None:
+        logger.warning(
+            "Cannot resolve channel entity: %s",
+            channel_id,
+        )
+        return
+
     messages = await client.get_messages(
-        channel_id, 
-        min_id=known_message_id - 40, 
-        max_id=known_message_id + 10
+        entity,
+        min_id=max(0, known_message_id - 40),
+        max_id=known_message_id + 10,
     )
     
     # فیلتر کردن پیام‌هایی که متعلق به این آلبوم هستند
