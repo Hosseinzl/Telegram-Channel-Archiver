@@ -471,6 +471,25 @@ async def process_channel(client: TelegramClient, channel_id, target_entity):
 
             # ۳. فوروارد پیام به مقصد
             try:
+                if not message:
+                    return False
+
+                if message.action:
+                    logger.info(
+                        "Skipping service message %s/%s",
+                        channel_id,
+                        message.id,
+                    )
+                    return False
+
+                if not message.media and not message.message:
+                    logger.info(
+                        "Skipping empty message %s/%s",
+                        channel_id,
+                        message.id,
+                    )
+                    return False
+                
                 forwarded = await client.forward_messages(
                     target_entity,
                     message.id,
