@@ -115,11 +115,31 @@ class Database:
     # ── Legacy archive operations ───────────────────────────────────────────
 
     async def save_message(self, data: dict[str, Any]) -> str:
-        """Insert message metadata and return inserted id."""
-
         data["_created_at"] = datetime.now(timezone.utc).replace(microsecond=0)
-        result = await self.messages.insert_one(data)
-        return str(result.inserted_id)
+
+        result = await self.messages.update_one(
+            {
+                "source_chat_id": data["source_chat_id"],
+                "source_msg_id": data["source_msg_id"],
+            },
+            {
+                "$setOnInsert": data
+            },
+            upsert=True,
+        )
+
+        if result.upserted_id:
+            return str(result.upserted_id)
+
+        existing = await self.messages.find_one(
+            {
+                "source_chat_id": data["source_chat_id"],
+                "source_msg_id": data["source_msg_id"],
+            },
+            {"_id": 1},
+        )
+
+        return str(existing["_id"]) if existing else ""
 
     async def message_exists(self, channel_id: str, message_id: int) -> bool:
         """Check if a channel message has already been processed."""

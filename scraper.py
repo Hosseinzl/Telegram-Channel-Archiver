@@ -418,7 +418,12 @@ async def _process_album(
     # فقط اگر لیست آیدی‌ها را برای بات لازم دارید اضافه کنید
     if len(forwarded_ids) > 1:
         meta["forwarded_message_ids"] = forwarded_ids
-
+        logger.warning(
+            "SAVING MESSAGE chat=%s msg=%s grouped=%s",
+            meta["source_chat_id"],
+            meta["source_msg_id"],
+            meta.get("grouped_id"),
+        )
     await db.save_message(meta)
     logger.info("Processed album %s -> %s (Source: %s)", channel_id, forwarded_id, meta.get("source_msg_id"))
 
@@ -490,7 +495,12 @@ async def process_channel(client: TelegramClient, channel_id, target_entity):
             # نکته: دیگر source_chat_id و source_msg_id را دستی ست نمی‌کنیم
             # تا تابع زیر بتواند منبع اصلی (مثلا ورزش ۳) را به درستی شناسایی کند.
             meta = build_message_metadata(channel_id, message, f_id, media_info)
-            
+            logger.warning(
+                "SAVING MESSAGE chat=%s msg=%s grouped=%s",
+                meta["source_chat_id"],
+                meta["source_msg_id"],
+                meta.get("grouped_id"),
+            )
             await db.save_message(meta)
             logger.info("Processed %s/%s -> %s (Source: %s)", 
                         channel_id, message.id, f_id, meta.get('source_msg_id'))
