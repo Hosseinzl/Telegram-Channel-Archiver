@@ -1,10 +1,11 @@
 import asyncio
 import logging
 from datetime import datetime
-import os
 from typing import Any
 
 from telethon import TelegramClient
+from telethon.errors import FloodWaitError, RPCError
+from telethon.tl.functions.channels import JoinChannelRequest
 from telethon.tl.types import (
     MessageMediaPhoto,
     MessageMediaDocument,
@@ -13,8 +14,19 @@ from telethon.tl.types import (
     DocumentAttributeSticker,
 )
 
-from config import API_ID, API_HASH, SESSION_NAME, TARGET_GROUP, CHANNELS
-from database import db
+from config import (
+    API_ID,
+    API_HASH,
+    CHANNEL_SYNC_INTERVAL,
+    FETCH_PERMISSION_API,
+    FIRST_RUN_BACKLOG_LIMIT,
+    POLL_INTERVAL,
+    SESSION_NAME,
+    SESSION_PATH,
+    TARGET_GROUP,
+)
+import httpx
+from database.client import db
 
 logging.basicConfig(
     level=logging.INFO,
@@ -114,8 +126,113 @@ def merge_media_counts(counts_list: list[dict[str, Any]]) -> dict[str, Any]:
         merged["web_page"] = merged["web_page"] or c.get("web_page", False)
     return merged
 
+
+def _channel_ref(channel_id: str) -> int | str:
+    try:
+        return int(channel_id)
+    except (TypeError, ValueError):
+        return channel_id
+
+
+async def _safe_get_entity(client: TelegramClient, channel_id: str):
+    try:
+        return await client.get_entity(_channel_ref(channel_id))
+    except Exception:
+        return None
+
+
+async def sync_source_channels(client: TelegramClient) -> None:
+    active_sources = await db.list_source_channels(active_only=True)
+    pending_sources = await db.list_source_channels(active_only=True, validation_status="pending")
+
+    for source_channel in active_sources:
+        channel_id = str(source_channel["channel_id"])
+        live_entity = await _safe_get_entity(client, channel_id)
+        if live_entity is None:
+            continue
+
+        live_username = getattr(live_entity, "username", None)
+        live_title = getattr(live_entity, "title", None)
+
+        if (
+            live_username != source_channel.get("channel_username")
+            or live_title != source_channel.get("title")
+        ):
+            await db.update_source_channel_status(
+                channel_id,
+                channel_username=live_username,
+                title=live_title,
+            )
+
+    for source_channel in pending_sources:
+        channel_id = str(source_channel["channel_id"])
+        live_entity = await _safe_get_entity(client, channel_id)
+        if live_entity is None:
+            channel_username = source_channel.get("channel_username")
+            if not channel_username:
+                continue
+            try:
+                live_entity = await client(JoinChannelRequest(channel_username))
+            except FloodWaitError as exc:
+                logger.warning("Join delayed for %s: wait %ss", channel_id, exc.seconds)
+                continue
+            except RPCError as exc:
+                logger.warning("Failed to join pending channel %s: %s", channel_id, exc)
+                continue
+            except Exception as exc:
+                logger.warning("Unexpected join failure for %s: %s", channel_id, exc)
+                continue
+
+        live_username = getattr(live_entity, "username", None)
+        live_title = getattr(live_entity, "title", None)
+
+        await db.update_source_channel_status(
+            channel_id,
+            channel_username=live_username,
+            title=live_title,
+            validation_status="valid",
+            is_active=True,
+        )
+
+
+async def sync_destination_channels(client: TelegramClient) -> None:
+    destination_channels = await db.list_destination_channels(active_only=True)
+
+    for destination_channel in destination_channels:
+        channel_id = str(destination_channel["channel_id"])
+        live_entity = await _safe_get_entity(client, channel_id)
+        if live_entity is None:
+            continue
+
+        live_username = getattr(live_entity, "username", None)
+        live_title = getattr(live_entity, "title", None)
+        bot_status = "active" if getattr(live_entity, "broadcast", True) else "unknown"
+        can_post_messages = bool(getattr(live_entity, "can_post_messages", True))
+        is_bot_member = True
+        is_bot_admin = bool(getattr(live_entity, "admin_rights", None))
+
+        if (
+            live_username != destination_channel.get("channel_username")
+            or live_title != destination_channel.get("title")
+        ):
+            await db.update_destination_channel_status(
+                channel_id,
+                channel_username=live_username,
+                title=live_title,
+                bot_status=bot_status,
+                is_bot_member=is_bot_member,
+                is_bot_admin=is_bot_admin,
+                can_post_messages=can_post_messages,
+                validation_status=destination_channel.get("validation_status", "valid"),
+            )
+
+
+async def run_channel_sync_job(client: TelegramClient) -> None:
+    await sync_source_channels(client)
+    await sync_destination_channels(client)
+
 def build_message_metadata(
-    channel: str,
+    channel_id: str,
     message,
     forwarded_message_id: int,
     media_info: dict[str, Any],
@@ -156,11 +273,12 @@ def build_message_metadata(
 
     # 3. ساخت داکیومنت نهایی
     meta = {
-        "channel": channel,
+        "channel_id": channel_id,
         "source_chat_id": formatted_source_chat_id, # شناسنامه کانال (ورزش 3 یا تست)
         "source_msg_id": source_msg_id,            # شناسنامه پیام (290740 یا 32)
         "internal_source_id": internal_id,        # آیدی در کانال واسط شما
         "source_message_id": internal_id,         # برای سازگاری با کدهای قدیمی
+        "telegram_message_id": message.id,
         "source_date": message.date.isoformat() if message.date else None,
         "fetch_date": datetime.utcnow().isoformat(),
         "forwarded_message_id": forwarded_message_id,
@@ -185,9 +303,28 @@ def build_message_metadata(
     
     return meta
 
+async def can_fetch() -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.get(
+                FETCH_PERMISSION_API
+            )
+
+        if resp.status_code != 200:
+            logger.warning("Permission API returned %s", resp.status_code)
+            return False
+
+        data = resp.json()
+
+        return data.get("status") == "ok"
+
+    except Exception:
+        logger.exception("Permission API failed")
+        return False
+
 async def _fetch_album_messages(
     client: TelegramClient, 
-    channel: str, 
+    channel_id: str, 
     grouped_id: int, 
     known_message_id: int
 ) -> list:
@@ -197,7 +334,7 @@ async def _fetch_album_messages(
     """
     logger.debug(
         "Fetching album window %s grouped_id=%s around_message=%s",
-        channel,
+        channel_id,
         grouped_id,
         known_message_id,
     )
@@ -205,7 +342,7 @@ async def _fetch_album_messages(
     # گرفتن پیام‌های اطراف برای اطمینان از جمع‌آوری کل آلبوم
     # معمولاً آلبوم‌ها پشت سر هم هستند، پس بازه ۵۰ تایی کاملاً امن است
     messages = await client.get_messages(
-        channel, 
+        channel_id, 
         min_id=known_message_id - 40, 
         max_id=known_message_id + 10
     )
@@ -221,7 +358,7 @@ async def _fetch_album_messages(
 
 async def _process_album(
     client: TelegramClient,
-    channel: str,
+    channel_id: str,
     target_entity,
     album_messages: list,
 ) -> None:
@@ -240,7 +377,7 @@ async def _process_album(
     text_combined = "\n\n".join(text_parts)
 
     try:
-        forwarded = await client.forward_messages(target_entity, ids, channel)
+        forwarded = await client.forward_messages(target_entity, ids, channel_id)
         if isinstance(forwarded, list):
             forwarded_ids = [f.id for f in forwarded if f] if forwarded else []
             forwarded_id = forwarded_ids[0] if forwarded_ids else 0
@@ -248,14 +385,14 @@ async def _process_album(
             forwarded_id = forwarded.id if forwarded else 0
             forwarded_ids = [forwarded_id] if forwarded_id else []
     except Exception as e:
-        logger.error("Failed to forward album %s: %s", channel, e)
+        logger.error("Failed to forward album %s: %s", channel_id, e)
         return
 
     # --- اصلاح اصلی اینجاست ---
     # فقط تابع را صدا می‌زنیم. این تابع خودش هوشمند است و 
     # اگر آلبوم فورواردی باشد، آیدی منبع اصلی (ورزش 3) را برمی‌دارد.
     meta = build_message_metadata(
-        channel,
+        channel_id,
         album_messages[0],
         forwarded_id,
         media_info,
@@ -263,26 +400,26 @@ async def _process_album(
         text_combined=text_combined,
         album_count=len(album_messages),
     )
-    
+    meta["telegram_message_id"] = ids[-1]
+
     # دیگر دستی source_chat_id یا source_msg_id را ست نکنید!
     # فقط اگر لیست آیدی‌ها را برای بات لازم دارید اضافه کنید
     if len(forwarded_ids) > 1:
         meta["forwarded_message_ids"] = forwarded_ids
 
     await db.save_message(meta)
-    logger.info("Processed album %s -> %s (Source: %s)", channel, forwarded_id, meta.get("source_msg_id"))
+    logger.info("Processed album %s -> %s (Source: %s)", channel_id, forwarded_id, meta.get("source_msg_id"))
 
-async def process_channel(client: TelegramClient, channel: str, target_entity):
+async def process_channel(client: TelegramClient, channel_id, target_entity):
     """Fetch all messages from a channel, forward each to target, save to DB."""
-    logger.info("Processing channel: %s", channel)
+    logger.info("Processing channel: %s", channel_id)
 
     try:
-        last_id = await db.get_last_source_message_id(channel)
+        last_id = await db.get_last_telegram_message_id(channel_id)
         
         # تعیین لیست پیام‌ها برای اجرای اول (First Run)
         if last_id is None:
-            backlog_limit = int(os.getenv("FIRST_RUN_BACKLOG_LIMIT", "5"))
-            messages = await client.get_messages(channel, limit=backlog_limit)
+            messages = await client.get_messages(channel_id, limit=FIRST_RUN_BACKLOG_LIMIT)
             messages = [m for m in messages if m]
             messages.sort(key=lambda m: m.id)
         else:
@@ -292,15 +429,15 @@ async def process_channel(client: TelegramClient, channel: str, target_entity):
         async def handle_single_message(message):
             # ۱. بررسی تکراری بودن (آلبوم یا پیام تکی)
             if message.grouped_id:
-                if await db.grouped_exists(channel, message.grouped_id) or await db.message_exists(channel, message.id):
+                if await db.grouped_exists(channel_id, message.grouped_id) or await db.message_exists(channel_id, message.id):
                     return False
-                album = await _fetch_album_messages(client, channel, message.grouped_id, message.id)
+                album = await _fetch_album_messages(client, channel_id, message.grouped_id, message.id)
                 if album:
-                    await _process_album(client, channel, target_entity, album)
+                    await _process_album(client, channel_id, target_entity, album)
                     return True
                 return False
 
-            if await db.message_exists(channel, message.id):
+            if await db.message_exists(channel_id, message.id):
                 return False
 
             # ۲. آنالیز رسانه
@@ -308,21 +445,21 @@ async def process_channel(client: TelegramClient, channel: str, target_entity):
 
             # ۳. فوروارد پیام به مقصد
             try:
-                forwarded = await client.forward_messages(target_entity, message.id, channel)
+                forwarded = await client.forward_messages(target_entity, message.id, channel_id)
                 # استخراج آیدی پیام فوروارد شده در مقصد
                 f_id = forwarded[0].id if isinstance(forwarded, list) else (forwarded.id if forwarded else 0)
             except Exception as e:
-                logger.error("Failed to forward %s/%s: %s", channel, message.id, e)
+                logger.error("Failed to forward %s/%s: %s", channel_id, message.id, e)
                 return False
 
             # ۴. ساخت و ذخیره متادیتا (اصلاح شده)
             # نکته: دیگر source_chat_id و source_msg_id را دستی ست نمی‌کنیم
             # تا تابع زیر بتواند منبع اصلی (مثلا ورزش ۳) را به درستی شناسایی کند.
-            meta = build_message_metadata(channel, message, f_id, media_info)
+            meta = build_message_metadata(channel_id, message, f_id, media_info)
             
             await db.save_message(meta)
             logger.info("Processed %s/%s -> %s (Source: %s)", 
-                        channel, message.id, f_id, meta.get('source_msg_id'))
+                        channel_id, message.id, f_id, meta.get('source_msg_id'))
             return True
 
         # ۵. اجرای حلقه پردازش
@@ -331,14 +468,14 @@ async def process_channel(client: TelegramClient, channel: str, target_entity):
                 if await handle_single_message(m):
                     await asyncio.sleep(1)
         else:
-            async for m in client.iter_messages(channel, min_id=last_id):
+            async for m in client.iter_messages(channel_id, min_id=last_id):
                 if not m: continue
                 if await handle_single_message(m):
                     await asyncio.sleep(1)
 
-        logger.info("Channel done %s", channel)
+        logger.info("Channel done %s", channel_id)
     except Exception as e:
-        logger.exception("Error processing channel %s: %s", channel, e)
+        logger.exception("Error processing channel %s: %s", channel_id, e)
 
 async def run():
     """Main agent loop."""
@@ -346,18 +483,18 @@ async def run():
         raise ValueError("Set TELEGRAM_API_ID and TELEGRAM_API_HASH in .env")
     if not TARGET_GROUP:
         raise ValueError("Set TARGET_GROUP_ID in .env")
-    if not CHANNELS:
-        raise ValueError("Set TELEGRAM_CHANNELS (comma-separated) in .env")
+    if not FETCH_PERMISSION_API:
+        raise ValueError("Set FETCH_PERMISSION_API in .env")
+    
 
     # Session file: use SESSION_PATH for Docker volume persistence
-    import os
-    session_path = os.getenv("SESSION_PATH", "")
-    session_file = f"{session_path.rstrip('/')}/{SESSION_NAME}" if session_path else SESSION_NAME
+    session_file = f"{SESSION_PATH.rstrip('/')}/{SESSION_NAME}" if SESSION_PATH else SESSION_NAME
 
     client = TelegramClient(session_file, API_ID, API_HASH)
 
     # How often to poll channels for new messages (in seconds).
-    poll_interval = int(os.getenv("POLL_INTERVAL", "10"))
+    poll_interval = POLL_INTERVAL
+    channel_sync_interval = CHANNEL_SYNC_INTERVAL
     logger.info("Starting scraper channels=%d target_group=%s poll_interval=%ss", len(CHANNELS), TARGET_GROUP, poll_interval)
 
     async with client:
@@ -367,11 +504,29 @@ async def run():
         logger.info("Resolved target entity: %s", TARGET_GROUP)
 
         try:
+            last_channel_sync = 0.0
             while True:
                 logger.debug("Poll cycle start")
-                for channel in CHANNELS:
-                    await process_channel(client, channel, target_entity)
-                logger.debug("Poll cycle done; sleeping %ss", poll_interval)
+
+                now_ts = datetime.utcnow().timestamp()
+                if now_ts - last_channel_sync >= channel_sync_interval:
+                    await run_channel_sync_job(client)
+                    last_channel_sync = now_ts
+
+                source_channels = await db.list_source_channels(active_only=True, validation_status="valid")
+                logger.info("Active valid source channels: %d", len(source_channels))
+                if await can_fetch():
+                    for source_channel in source_channels:
+                        channel_id = str(source_channel["channel_id"])
+                        await process_channel(
+                            client,
+                            channel_id,
+                            target_entity,
+                        )
+                else:
+                    logger.info("Fetch skipped. Permission denied.")
+
+                logger.debug("Poll cycle done")
                 await asyncio.sleep(poll_interval)
         finally:
             logger.info("Shutting down; closing DB connection")
