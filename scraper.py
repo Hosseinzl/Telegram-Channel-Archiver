@@ -24,6 +24,7 @@ from config import (
     SESSION_NAME,
     SESSION_PATH,
     TARGET_GROUP,
+    SUPERVISOR_ID
 )
 import httpx
 from database.client import db
@@ -409,22 +410,55 @@ def build_message_metadata(
 async def can_fetch() -> bool:
     try:
         async with httpx.AsyncClient(timeout=10) as client:
-            resp = await client.get(
-                FETCH_PERMISSION_API
-            )
+            resp = await client.get(FETCH_PERMISSION_API)
 
         if resp.status_code != 200:
-            logger.warning("Permission API returned %s", resp.status_code)
+            logger.warning(
+                "Permission API returned HTTP %s",
+                resp.status_code,
+            )
             return False
 
         data = resp.json()
 
         return data.get("ready") is True
 
-    except Exception:
-        logger.exception("Permission API failed")
+    except httpx.RequestError as exc:
+        logger.warning(
+            "Permission API unavailable: %s",
+            exc,
+        )
         return False
 
+    except Exception as exc:
+        logger.error(
+            "Permission API check failed: %s",
+            exc,
+        )
+        return False
+
+async def notify_pv(
+    client: TelegramClient,
+    message: str,
+    pv_entity=None,
+) -> None:
+    """Send a notification message to the supervisor's private chat."""
+    try:
+        if pv_entity is None:
+            pv_entity = await client.get_entity(SUPERVISOR_ID)
+
+        await client.send_message(
+            pv_entity,
+            message,
+            parse_mode="html",
+        )
+
+    except Exception as exc:
+        logger.error(
+            "Failed to send notification to PV: %s",
+            exc,
+        )
+    
 async def _fetch_album_messages(
     client: TelegramClient, 
     channel_id: str, 
@@ -700,13 +734,22 @@ async def run():
                 if await can_fetch():
                     for source_channel in source_channels:
                         channel_id = str(source_channel["channel_id"])
+
                         await process_channel(
                             client,
                             channel_id,
                             target_entity,
                         )
                 else:
-                    logger.info("Fetch skipped. Permission denied.")
+                    logger.warning(
+                        "Fetch skipped. Permission API is unavailable or permission denied."
+                    )
+
+                    await notify_pv(
+                        "⚠️ <b>خطا در دسترسی به بات</b>\n\n"
+                        "آرشیور نتوانست به سرویس بات دسترسی پیدا کند.\n"
+                        "دریافت پیام‌ها متوقف شد."
+                    )
 
                 logger.debug("Poll cycle done")
                 await asyncio.sleep(poll_interval)
