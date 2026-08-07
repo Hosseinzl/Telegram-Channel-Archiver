@@ -711,6 +711,8 @@ async def run():
     channel_sync_interval = CHANNEL_SYNC_INTERVAL
     logger.info("Starting scraper channels=%d poll_interval=%ss", TARGET_GROUP, poll_interval)
 
+    permission_was_available = True
+
     try:
         await db.connect()
 
@@ -731,7 +733,20 @@ async def run():
 
                 source_channels = await get_updated_source_channels(client)
                 logger.info("Active valid source channels: %d", len(source_channels))
-                if await can_fetch():
+                permission_available = await can_fetch()
+
+                if permission_available:
+                    if not permission_was_available:
+                        await notify_pv(
+                            client=client,
+                            message=(
+                                "🟢 <b>دسترسی به بات برقرار شد</b>\n\n"
+                                "آرشیور دوباره می‌تواند پیام‌ها را دریافت کند."
+                            ),
+                        )
+
+                    permission_was_available = True
+
                     for source_channel in source_channels:
                         channel_id = str(source_channel["channel_id"])
 
@@ -740,19 +755,23 @@ async def run():
                             channel_id,
                             target_entity,
                         )
+
                 else:
+                    if permission_was_available:
+                        await notify_pv(
+                            client=client,
+                            message=(
+                                "⚠️ <b>خطا در دسترسی به بات</b>\n\n"
+                                "آرشیور نتوانست به سرویس بات دسترسی پیدا کند.\n"
+                                "دریافت پیام‌ها متوقف شد."
+                            ),
+                        )
+
+                    permission_was_available = False
+
                     logger.warning(
                         "Fetch skipped. Permission API is unavailable or permission denied."
                     )
-
-                    await notify_pv(
-                        client=client,
-                        message=
-                        "⚠️ <b>خطا در دسترسی به بات</b>\n\n"
-                        "آرشیور نتوانست به سرویس بات دسترسی پیدا کند.\n"
-                        "دریافت پیام‌ها متوقف شد."
-                    )
-
                 logger.debug("Poll cycle done")
                 await asyncio.sleep(poll_interval)
     finally:
