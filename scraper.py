@@ -217,6 +217,118 @@ async def sync_destination_channels(client: TelegramClient) -> None:
                 title=live_title,
             )
 
+async def get_updated_source_channels(
+    client: TelegramClient,
+) -> list[dict]:
+    try:
+        pending_sources = await db.list_source_channels(
+            active_only=True,
+            validation_status="pending",
+        )
+
+        for source_channel in pending_sources:
+            channel_id = str(source_channel["channel_id"])
+
+            try:
+                # اولویت همیشه با channel_id است
+                live_entity = await _safe_get_entity(
+                    client,
+                    channel_id,
+                )
+
+                # اگر entity در session/cache پیدا نشد،
+                # در صورت داشتن username سعی می‌کنیم وارد کانال شویم.
+                if live_entity is None:
+                    channel_username = source_channel.get("channel_username")
+
+                    if not channel_username:
+                        logger.warning(
+                            "Cannot resolve source channel %s: "
+                            "no username available for fallback",
+                            channel_id,
+                        )
+                        continue
+
+                    try:
+                        live_entity = await client(
+                            JoinChannelRequest(channel_username)
+                        )
+
+                    except FloodWaitError as exc:
+                        logger.warning(
+                            "Join delayed for %s: wait %ss",
+                            channel_id,
+                            exc.seconds,
+                        )
+                        continue
+
+                    except RPCError as exc:
+                        logger.warning(
+                            "Failed to join source channel %s: %s",
+                            channel_id,
+                            exc,
+                        )
+                        continue
+
+                    except Exception as exc:
+                        logger.warning(
+                            "Unexpected join failure for %s: %s",
+                            channel_id,
+                            exc,
+                        )
+                        continue
+
+                # اگر به هر دلیلی هنوز entity نداریم
+                if live_entity is None:
+                    logger.warning(
+                        "Could not resolve source channel %s",
+                        channel_id,
+                    )
+                    continue
+
+                live_username = getattr(
+                    live_entity,
+                    "username",
+                    None,
+                )
+                live_title = getattr(
+                    live_entity,
+                    "title",
+                    None,
+                )
+
+                # ID دیتابیس همان ID اصلی کانال باقی می‌ماند.
+                await db.update_source_channel_status(
+                    channel_id,
+                    channel_username=live_username,
+                    title=live_title,
+                    validation_status="valid",
+                    is_active=True,
+                )
+
+                logger.info(
+                    "Validated source channel %s (%s)",
+                    channel_id,
+                    live_title or live_username or "unknown",
+                )
+
+            except Exception:
+                logger.exception(
+                    "Failed to refresh source channel %s",
+                    channel_id,
+                )
+                continue
+
+        return await db.list_source_channels(
+            active_only=True,
+            validation_status="valid",
+        )
+
+    except Exception:
+        logger.exception(
+            "Failed to get updated source channels"
+        )
+        return []
 
 async def run_channel_sync_job(client: TelegramClient) -> None:
     await sync_source_channels(client)
@@ -583,7 +695,7 @@ async def run():
                     await run_channel_sync_job(client)
                     last_channel_sync = now_ts
 
-                source_channels = await db.list_source_channels(active_only=True, validation_status="valid")
+                source_channels = await get_updated_source_channels(client)
                 logger.info("Active valid source channels: %d", len(source_channels))
                 if await can_fetch():
                     for source_channel in source_channels:
