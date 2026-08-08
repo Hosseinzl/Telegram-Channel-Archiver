@@ -155,6 +155,8 @@ class Database:
                     },
                     {
                         "$or": [
+                            {"telegram_message_id": message_id},
+                            {"telegram_message_ids": message_id},
                             {"source_message_id": message_id},
                             {"source_message_ids": message_id},
                         ]
@@ -163,6 +165,7 @@ class Database:
             }
         )
         return doc is not None
+
 
     async def grouped_exists(self, channel_id: str, grouped_id: int) -> bool:
         """Check if an album has already been processed."""
