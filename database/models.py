@@ -225,6 +225,10 @@ class SourceChannel(BaseModel):
     channel_id: str = Field(..., description="Telegram channel ID (string form)")
     channel_username: str | None = Field(default=None, description="@username without the @")
     title: str | None = Field(default=None, description="Display title of the channel")
+    last_message_id: int | None = Field(
+        default=None,
+        description="Current Telegram message cursor for ingestion",
+    )
     added_by: int = Field(..., description="Telegram ID of the admin who added this channel")
     added_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     is_active: bool = Field(default=True)

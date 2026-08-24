@@ -9,6 +9,7 @@ from typing import Any
 import structlog
 from bson import ObjectId
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from pymongo import ReturnDocument
 
 logger = structlog.get_logger(__name__)
 
@@ -209,7 +210,20 @@ class Database:
 
 
     async def get_last_telegram_message_id(self, channel_id: str) -> int | None:
-        """Return the highest stored telegram_message_id for a channel."""
+        """Return the stored ingestion cursor for a source channel."""
+
+        doc = await self.source_channels.find_one(
+            {"channel_id": channel_id},
+            projection={"last_message_id": 1, "_id": 0},
+        )
+        if not doc or "last_message_id" not in doc:
+            return None
+        if doc["last_message_id"] is None:
+            return None
+        return int(doc["last_message_id"])
+
+    async def has_message_history(self, channel_id: str) -> bool:
+        """Return True if the legacy messages collection already has entries."""
 
         doc = await self.messages.find_one(
             {
@@ -223,12 +237,49 @@ class Database:
                     {"telegram_message_id": {"$exists": True}},
                 ]
             },
-            sort=[("telegram_message_id", -1)],
-            projection={"telegram_message_id": 1, "_id": 0},
+            projection={"_id": 1},
         )
-        if not doc:
-            return None
-        return int(doc["telegram_message_id"])
+        return doc is not None
+
+    async def set_source_channel_last_message_id(
+        self,
+        channel_id: str,
+        message_id: int | None,
+        *,
+        use_max: bool = False,
+    ) -> bool:
+        """Persist the ingestion cursor for a source channel.
+
+        When ``use_max`` is True the cursor only moves forward. When it is False
+        the cursor is only set if the stored value is missing, null, or older.
+        """
+
+        if message_id is None:
+            result = await self.source_channels.update_one(
+                {"channel_id": channel_id},
+                {"$set": {"last_message_id": None}},
+            )
+            return result.matched_count > 0
+
+        if use_max:
+            result = await self.source_channels.update_one(
+                {"channel_id": channel_id},
+                {"$max": {"last_message_id": message_id}},
+            )
+            return result.matched_count > 0
+
+        result = await self.source_channels.update_one(
+            {
+                "channel_id": channel_id,
+                "$or": [
+                    {"last_message_id": {"$exists": False}},
+                    {"last_message_id": None},
+                    {"last_message_id": {"$lt": message_id}},
+                ],
+            },
+            {"$set": {"last_message_id": message_id}},
+        )
+        return result.matched_count > 0
     
     # ── FetchedMessage operations ─────────────────────────────────────────────
 
@@ -519,9 +570,11 @@ class Database:
                     "channel_id": channel_id,
                     "added_by": added_by,
                     "added_at": now,
+                    "last_message_id": None,
                 },
             },
             upsert=True,
+            return_document=ReturnDocument.AFTER,
         )
 
         return doc  # type: ignore[return-value]

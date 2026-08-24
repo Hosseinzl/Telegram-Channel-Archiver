@@ -20,3 +20,6 @@ build/
 .env.local
 .env.example
 *.session
+
+# Test directory
+tests/

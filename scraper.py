@@ -142,6 +142,29 @@ async def _safe_get_entity(client: TelegramClient, channel_id: str):
         return None
 
 
+async def _get_latest_channel_message_id(
+    client: TelegramClient,
+    channel_entity,
+    channel_id: str,
+) -> int | None:
+    """Return the newest retrievable Telegram message ID for a channel."""
+
+    try:
+        latest_messages = await client.get_messages(channel_entity, limit=1)
+    except Exception as exc:
+        logger.warning(
+            "Failed to fetch latest message for %s: %s",
+            channel_id,
+            exc,
+        )
+        return None
+
+    latest_message = next((message for message in latest_messages if message), None)
+    if latest_message is None:
+        return None
+    return latest_message.id
+
+
 async def sync_source_channels(client: TelegramClient) -> None:
     active_sources = await db.list_source_channels(active_only=True)
     pending_sources = await db.list_source_channels(active_only=True, validation_status="pending")
@@ -297,6 +320,49 @@ async def get_updated_source_channels(
                     "title",
                     None,
                 )
+
+                cursor_value = source_channel.get("last_message_id")
+
+                should_reset_cursor = False
+                if cursor_value is not None:
+                    should_reset_cursor = True
+                else:
+                    should_reset_cursor = await db.has_message_history(channel_id)
+
+                if should_reset_cursor:
+                    latest_message_id = await _get_latest_channel_message_id(
+                        client,
+                        live_entity,
+                        channel_id,
+                    )
+
+                    if latest_message_id is None:
+                        logger.warning(
+                            "Could not initialize cursor for %s: no latest message available",
+                            channel_id,
+                        )
+                        continue
+
+                    if not await db.set_source_channel_last_message_id(
+                        channel_id,
+                        latest_message_id,
+                    ):
+                        logger.warning(
+                            "Failed to store reactivation cursor for %s",
+                            channel_id,
+                        )
+                        continue
+
+                    logger.info(
+                        "Reactivated source channel %s: cursor moved to %s",
+                        channel_id,
+                        latest_message_id,
+                    )
+                else:
+                    logger.info(
+                        "Initialized new source channel %s without cursor; first-run backlog will be processed",
+                        channel_id,
+                    )
 
                 # ID دیتابیس همان ID اصلی کانال باقی می‌ماند.
                 await db.update_source_channel_status(
@@ -571,6 +637,16 @@ async def _process_album(
             meta.get("grouped_id"),
         )
     await db.save_message(meta)
+    if not await db.set_source_channel_last_message_id(
+        str(channel_id),
+        ids[-1],
+        use_max=True,
+    ):
+        logger.warning(
+            "Failed to advance album cursor for %s to %s",
+            channel_id,
+            ids[-1],
+        )
     logger.info("Processed album %s -> %s (Source: %s)", channel_id, forwarded_id, meta.get("source_msg_id"))
 
 async def process_channel(client: TelegramClient, channel_id, target_entity):
@@ -584,6 +660,32 @@ async def process_channel(client: TelegramClient, channel_id, target_entity):
             return
 
         last_id = await db.get_last_telegram_message_id(channel_id)
+
+        if last_id is None and await db.has_message_history(str(channel_id)):
+            latest_message_id = await _get_latest_channel_message_id(
+                client,
+                source_entity,
+                str(channel_id),
+            )
+
+            if latest_message_id is None:
+                logger.warning(
+                    "Skipping channel %s until a cursor can be initialized safely",
+                    channel_id,
+                )
+                return
+
+            if await db.set_source_channel_last_message_id(
+                str(channel_id),
+                latest_message_id,
+            ):
+                logger.info(
+                    "Initialized legacy source channel %s cursor to %s",
+                    channel_id,
+                    latest_message_id,
+                )
+
+            last_id = await db.get_last_telegram_message_id(str(channel_id))
         
         # تعیین لیست پیام‌ها برای اجرای اول (First Run)
         if last_id is None:
@@ -667,6 +769,16 @@ async def process_channel(client: TelegramClient, channel_id, target_entity):
                 meta.get("grouped_id"),
             )
             await db.save_message(meta)
+            if not await db.set_source_channel_last_message_id(
+                str(channel_id),
+                message.id,
+                use_max=True,
+            ):
+                logger.warning(
+                    "Failed to advance cursor for %s to %s",
+                    channel_id,
+                    message.id,
+                )
             logger.info("Processed %s/%s -> %s (Source: %s)", 
                         channel_id, message.id, f_id, meta.get('source_msg_id'))
             return True
@@ -780,7 +892,6 @@ async def run():
 
 def main():
     asyncio.run(run())
-
 
 if __name__ == "__main__":
     main()
